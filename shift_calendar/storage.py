@@ -1,7 +1,9 @@
+import io
 import json
 import os
 import re
 import time
+import zipfile
 
 from shift_calendar.config import _STORAGE_LOCK, _atomic_write_json, _atomic_write_text
 from shift_calendar.domain import (
@@ -371,6 +373,103 @@ def update_history_shift_hourly_leave(history_dir, hist_id, date_str, hours, loa
         return updated_shift
 
 
+def update_history_shift(history_dir, hist_id, date_str, updates, load_config_fn):
+    """指定履歴の該当日のシフト区分・時間・時間有給・行事予定を更新して保存する。"""
+    safe_id = sanitize_history_id(hist_id)
+    if not safe_id:
+        raise ValueError("履歴IDが指定されていません")
+    norm_date = str(date_str or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", norm_date):
+        raise ValueError("日付の形式が不正です")
+    if not isinstance(updates, dict):
+        raise ValueError("更新内容の形式が不正です")
+
+    with _STORAGE_LOCK:
+        fpath = os.path.join(history_dir, f"{safe_id}.json")
+        if not os.path.exists(fpath):
+            raise FileNotFoundError("対象の履歴が見つかりません")
+
+        with open(fpath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        shifts = data.get("shifts")
+        if not isinstance(shifts, list):
+            raise ValueError("履歴にシフトデータが含まれていません")
+
+        cfg = load_config_fn()
+        time_defs = cfg.get("time_definitions") or {}
+        max_hours = max(0.5, _clamp_half_hour(cfg.get("paid_leave_hours_per_day"), 8.0, 1.0, 24.0) - 0.5)
+
+        updated_shift = None
+        for s in shifts:
+            if not (isinstance(s, dict) and str(s.get("date") or "").strip() == norm_date):
+                continue
+
+            new_type = str(updates.get("type") if "type" in updates else (s.get("type") or "")).strip()
+            raw_status = str(updates.get("status") or "").strip()
+
+            if new_type in ("休", "休み") or raw_status == "holiday":
+                status = "holiday"
+                s["type"] = "休"
+                s["status"] = "holiday"
+                s["is_holiday"] = True
+                s["is_paid_leave"] = False
+                s["start_time"] = None
+                s["end_time"] = None
+                s["hourly_paid_leave"] = 0.0
+                s["summary"] = "休み"
+            elif new_type in ("有給", "有給休暇") or raw_status == "paid_leave":
+                status = "paid_leave"
+                s["type"] = "有給"
+                s["status"] = "paid_leave"
+                s["is_holiday"] = False
+                s["is_paid_leave"] = True
+                s["start_time"] = None
+                s["end_time"] = None
+                s["hourly_paid_leave"] = 0.0
+                s["summary"] = "有給休暇"
+            else:
+                if not new_type:
+                    raise ValueError("シフト区分を指定してください")
+                status = "work"
+                def_entry = time_defs.get(new_type) if isinstance(time_defs, dict) else None
+                start_t = str(updates.get("start_time") or "").strip()
+                end_t = str(updates.get("end_time") or "").strip()
+                if not start_t and def_entry:
+                    start_t = str(def_entry.get("start") or "").strip()
+                if not end_t and def_entry:
+                    end_t = str(def_entry.get("end") or "").strip()
+                if not start_t:
+                    start_t = str(s.get("start_time") or "08:30").strip()
+                if not end_t:
+                    end_t = str(s.get("end_time") or "17:30").strip()
+
+                raw_hours = updates.get("hourly_paid_leave") if "hourly_paid_leave" in updates else s.get("hourly_paid_leave", 0)
+                norm_hours = _clamp_half_hour(raw_hours, 0.0, 0.0, max_hours)
+
+                s["type"] = new_type
+                s["status"] = "work"
+                s["is_holiday"] = False
+                s["is_paid_leave"] = False
+                s["start_time"] = start_t
+                s["end_time"] = end_t
+                s["hourly_paid_leave"] = norm_hours
+                base_summary = f"[{new_type}] ({start_t}〜{end_t})" if (start_t and end_t) else f"[{new_type}]"
+                s["summary"] = apply_hourly_leave_to_summary(base_summary, norm_hours, status)
+
+            if "event" in updates:
+                s["event"] = str(updates.get("event") or "").replace("\r", " ").replace("\n", " ").strip()
+
+            updated_shift = dict(s)
+            break
+
+        if updated_shift is None:
+            raise ValueError("対象の日付が履歴内に見つかりません")
+
+        _atomic_write_json(fpath, data)
+        return updated_shift
+
+
 def get_registered_calendar_shifts(history_dir):
     """登録済み（registered=True）の履歴のみを日付（YYYY-MM-DD）単位で統合して返す。
     同一日付が複数履歴にある場合は registered_at（なければ created_at）および id が新しいものを優先する。
@@ -431,4 +530,147 @@ def get_registered_calendar_shifts(history_dir):
             "shifts_by_date": shifts_by_date,
             "available_months": available_months,
             "registered_histories_count": len(registered_records),
+        }
+
+
+MAX_BACKUP_ZIP_ENTRIES = 1000
+MAX_BACKUP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200MB
+
+
+def export_history_backup_zip(history_dir, strftime_fn=None):
+    """履歴JSON（history/）および分離画像（history_images/）をZIPバイト列へ一括エクスポートする。"""
+    fmt_time = strftime_fn or time.strftime
+    with _STORAGE_LOCK:
+        buf = io.BytesIO()
+        histories_count = 0
+        images_count = 0
+        img_dir = get_history_images_dir(history_dir)
+
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if os.path.isdir(history_dir):
+                for fname in sorted(os.listdir(history_dir)):
+                    if not fname.endswith(".json"):
+                        continue
+                    fpath = os.path.join(history_dir, fname)
+                    if not os.path.isfile(fpath):
+                        continue
+                    safe_stem = sanitize_history_id(fname[:-5])
+                    if not safe_stem:
+                        continue
+                    with open(fpath, "rb") as f:
+                        zf.writestr(f"history/{safe_stem}.json", f.read())
+                    histories_count += 1
+
+            if os.path.isdir(img_dir):
+                for fname in sorted(os.listdir(img_dir)):
+                    if not fname.endswith(".b64"):
+                        continue
+                    fpath = os.path.join(img_dir, fname)
+                    if not os.path.isfile(fpath):
+                        continue
+                    safe_stem = sanitize_history_id(fname[:-4])
+                    if not safe_stem:
+                        continue
+                    with open(fpath, "rb") as f:
+                        zf.writestr(f"history_images/{safe_stem}.b64", f.read())
+                    images_count += 1
+
+            manifest = {
+                "format_version": 1,
+                "exported_at": fmt_time("%Y-%m-%d %H:%M:%S"),
+                "histories_count": histories_count,
+                "images_count": images_count,
+            }
+            zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+
+        return buf.getvalue()
+
+
+def import_history_backup_zip(history_dir, zip_bytes, overwrite=False):
+    """バックアップZIPを検証し、履歴JSONと分離画像を安全に復元する（デフォルトは既存IDスキップ）。"""
+    if not isinstance(zip_bytes, (bytes, bytearray)) or len(zip_bytes) == 0:
+        raise ValueError("バックアップZIPデータが空です")
+
+    try:
+        zf_ctx = zipfile.ZipFile(io.BytesIO(zip_bytes), "r")
+    except zipfile.BadZipFile as e:
+        raise ValueError("有効なZIPファイルではありません") from e
+
+    parsed_histories = {}
+    parsed_images = {}
+
+    with zf_ctx as zf:
+        infos = zf.infolist()
+        if len(infos) > MAX_BACKUP_ZIP_ENTRIES:
+            raise ValueError("ZIP内のファイル数が上限を超えています")
+
+        total_uncompressed = 0
+        for info in infos:
+            name = info.filename
+            if info.is_dir():
+                continue
+            if not name or name.startswith("/") or "\\" in name or ".." in name.split("/"):
+                raise ValueError(f"不正なZIPエントリパスが含まれています: {name}")
+            total_uncompressed += int(info.file_size or 0)
+            if total_uncompressed > MAX_BACKUP_UNCOMPRESSED_BYTES:
+                raise ValueError("ZIP展開サイズが上限を超えています")
+
+            if name == "manifest.json":
+                continue
+
+            parts = name.split("/")
+            if len(parts) != 2:
+                raise ValueError(f"許可されていないZIP階層が含まれています: {name}")
+            folder, fname = parts
+
+            if folder == "history" and fname.endswith(".json"):
+                stem = fname[:-5]
+                safe_id = sanitize_history_id(stem)
+                if not safe_id or safe_id != stem:
+                    raise ValueError(f"不正な履歴ファイル名です: {fname}")
+                raw = zf.read(info)
+                try:
+                    obj = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    raise ValueError(f"履歴JSONの形式が不正です ({fname}): {e}") from e
+                if not isinstance(obj, dict):
+                    raise ValueError(f"履歴JSONはオブジェクト形式である必要があります ({fname})")
+                obj["id"] = safe_id
+                parsed_histories[safe_id] = obj
+            elif folder == "history_images" and fname.endswith(".b64"):
+                stem = fname[:-4]
+                safe_id = sanitize_history_id(stem)
+                if not safe_id or safe_id != stem:
+                    raise ValueError(f"不正な画像ファイル名です: {fname}")
+                raw = zf.read(info)
+                try:
+                    b64_text = raw.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    raise ValueError(f"画像データのエンコードが不正です ({fname})") from e
+                parsed_images[safe_id] = b64_text
+            else:
+                raise ValueError(f"許可されていないファイルが含まれています: {name}")
+
+    with _STORAGE_LOCK:
+        os.makedirs(history_dir, exist_ok=True)
+        imported_histories = 0
+        skipped_histories = 0
+        imported_images = 0
+
+        for safe_id, obj in parsed_histories.items():
+            fpath = os.path.join(history_dir, f"{safe_id}.json")
+            if os.path.exists(fpath) and not overwrite:
+                skipped_histories += 1
+                continue
+            if safe_id in parsed_images:
+                obj["image_file"] = save_history_image(history_dir, safe_id, parsed_images[safe_id])
+                obj["has_image"] = True
+                imported_images += 1
+            _atomic_write_json(fpath, obj)
+            imported_histories += 1
+
+        return {
+            "imported_histories": imported_histories,
+            "skipped_histories": skipped_histories,
+            "imported_images": imported_images,
         }

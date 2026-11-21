@@ -145,11 +145,9 @@ class TestHistoryRetention(unittest.TestCase):
 
     def test_05_ui_groups_registered_and_unregistered_and_promotes_on_register(self):
         """実際のindex.htmlスクリプトで登録済/未登録のグループ分け表示と登録時昇格・ics非昇格を検証"""
-        with open(os.path.join(BASE_DIR, "index.html"), "r", encoding="utf-8") as f:
-            html = f.read()
+        from tests.dom_harness import extract_index_script
 
-        scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", html, flags=re.S)
-        script_code = max(scripts, key=len)
+        script_code = extract_index_script(os.path.join(BASE_DIR, "index.html"))
 
         node_runner = r"""
 const fs = require("fs");

@@ -23,7 +23,7 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 ### プロジェクト固有コピー
 
 - プロジェクト名：シフトカレンダー登録アプリ（シフトカレンダーapp）
-- 検証規約バージョン：1.0.0
+- 検証規約バージョン：1.1.0
 - 取得元文書ID：VLH-001
 - 取得元テンプレートバージョン：1.0.0
 - 取得元最終更新日：2026-11-15
@@ -60,12 +60,12 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 - 言語・ランタイム：Python 3.14.3（Homebrew）、Node.js v24.16.0（補助検証用）
 - フレームワーク：Python標準 `http.server` + `unittest`、Vanilla HTML/CSS/JS
 - パッケージ管理：該当ファイル（`requirements.txt` / `pyproject.toml` / `package.json`）なし
-- ビルドツール：なし（インタプリタ実行・単一HTML）
-- テスト環境：`tests/` 配下12テストファイル＋`dom_harness.py`（`test_dewarping.py`, `test_grid_detection.py`, `test_events.py`, `test_gemini_client.py`, `test_history_retention.py`, `test_history_storage.py`, `test_security_and_concurrency.py`, `test_calendar_tab.py`, `test_brushup_features.py`, `test_progress_and_two_stage_ui.py`, `test_ui_sync.py`, `test_frontend_architecture.py`、`unittest`）
+- ビルドツール：なし（インタプリタ実行・`index.html` + `static/` 静的配信）
+- テスト環境：`tests/` 配下14テストファイル＋`dom_harness.py`（`test_dewarping.py`, `test_grid_detection.py`, `test_events.py`, `test_gemini_client.py`, `test_history_retention.py`, `test_history_storage.py`, `test_security_and_concurrency.py`, `test_calendar_tab.py`, `test_brushup_features.py`, `test_progress_and_two_stage_ui.py`, `test_ui_sync.py`, `test_frontend_architecture.py`, `test_architecture_improvements.py`, `test_improvements_v2.py`、`unittest`）
 - CI環境：なし
 - Git管理：ローカル Git 管理あり（`.gitignore` 適用済み）
 - Sandboxの制約：
-  - サンドボックス内ではワークスペース外（別会話ディレクトリ内の実写真フィクスチャ等）へアクセスできないため、一部実写真テストが自動スキップされる（全79件中4件スキップ、75件実行を確認済み）。
+  - サンドボックス内ではワークスペース外（別会話ディレクトリ内の実写真フィクスチャ等）へアクセスできないため、一部実写真テストが自動スキップされる（全94件中4件スキップ、90件実行を確認済み）。
   - ネットワークアクセスおよびポートバインド（ローカルサーバー起動確認等）はサンドボックス制限を受ける場合がある。
 
 ### 2.2 検証コマンド（実在を確認済み）
@@ -74,8 +74,8 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 |---|---|---|---|---|
 | 依存関係 | 未整備（パッケージ定義ファイルなし） | — | 該当なし | — |
 | フォーマット | 未整備（フォーマッター設定なし） | — | 任意 | — |
-| 静的解析（Python構文） | `python3 -m py_compile app.py` | Python構文エラー検査 | `app.py` 変更時必須 | 終了コード0・出力エラーなし |
-| 静的解析（JS構文） | `node` による `index.html` 内 `<script>` 抽出・構文チェック（`new Function` または一時ファイル `node --check`） | JS構文エラー検査 | `index.html` 変更時必須 | 終了コード0・SyntaxError 0件 |
+| 静的解析（Python構文） | `python3 -m py_compile app.py shift_calendar/*.py` | Python構文エラー検査 | Python変更時必須 | 終了コード0・出力エラーなし |
+| 静的解析（JS構文） | `node --check static/app.js`（および `dom_harness.py` 経由の構文検証） | JS構文エラー検査 | JS / `index.html` 変更時必須 | 終了コード0・SyntaxError 0件 |
 | Lint | 未整備（Linter設定なし） | — | 任意 | — |
 | 単体テスト（Python） | `python3 -m unittest discover -s tests -v` | 画像処理・グリッド検出の回帰検証 | 必須（Outer Loop） | 実行対象テストの失敗0件・エラー0件（スキップ件数は明記） |
 | 結合テスト / UI動作確認 | ローカルブラウザまたはヘッドレスDOM検証（未自動化・要確認） | UI連動・表示崩れ確認 | 変更内容に応じ実施 | 期待する操作連動が動作しコンソールエラー0件 |
@@ -84,9 +84,9 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 
 ### 2.3 コマンドの安全性
 
-- `python3 -m py_compile app.py`：ローカルのバイトコード構文検査のみ。外部通信・データ破壊なし。
-- `python3 -m unittest discover -s tests -v`：画像処理モジュールのローカル検証。外部API通信・Appleカレンダー操作・`history/` 変更なし。
-- `node` によるJS構文検査：構文パースのみ（コード実行なし）。外部通信・ファイル破壊なし。
+- `python3 -m py_compile app.py shift_calendar/*.py`：ローカルのバイトコード構文検査のみ。外部通信・データ破壊なし。
+- `python3 -m unittest discover -s tests -v`：画像処理・QR・履歴・DOMハーネス等のローカル検証。外部API通信・実Appleカレンダー操作・実 `history/` 変更なし。
+- `node --check static/app.js`：構文パースのみ（コード実行なし）。外部通信・ファイル破壊なし。
 
 ### 2.4 Sandbox外再試行の事前登録
 
@@ -108,7 +108,7 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 ## 4. Inner Loop：局所検証
 
 1. 変更内容と影響範囲（HTML構造、CSSスタイル、JSイベント・状態管理、Pythonエンドポイント等）を確認する。
-2. 変更ファイルに応じた構文検証（`index.html` のJS構文チェック、`app.py` の `py_compile`）を実行する。
+2. 変更ファイルに応じた構文検証（`node --check static/app.js`、`python3 -m py_compile app.py shift_calendar/*.py`）を実行する。
 3. 関連する単体テストやロジック確認を実行する。
 4. 問題があれば原因を調査し、最小変更で修正して再検証する。
 
@@ -122,8 +122,8 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 
 | 順序 | 検証 | コマンド | 必須条件 |
 |---|---|---|---|
-| 1 | Python構文チェック | `python3 -m py_compile app.py` | 必須（`app.py` 変更時） |
-| 2 | JS構文チェック | `node` による `index.html` 内 `<script>` 構文検証 | 必須（`index.html` 変更時） |
+| 1 | Python構文チェック | `python3 -m py_compile app.py shift_calendar/*.py` | 必須（Python変更時） |
+| 2 | JS構文チェック | `node --check static/app.js` | 必須（JS / `index.html` 変更時） |
 | 3 | Python単体テスト | `python3 -m unittest discover -s tests -v` | 必須 |
 | 4 | UI動作確認（該当変更時） | 変更したUI連動のロジック・表示・ライト／ダーク両対応の確認 | UI変更時必須（実ブラウザ未実施時は条件付き完了として明記） |
 

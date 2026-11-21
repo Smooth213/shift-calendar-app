@@ -12,18 +12,17 @@ if PROJECT_ROOT not in sys.path:
 
 import app as shift_app
 
+from tests.dom_harness import JS_LOAD_INDEX_SCRIPT_SNIPPET, load_index_html_with_assets
+
 INDEX_HTML_PATH = os.path.join(PROJECT_ROOT, "index.html")
 
 
 NODE_BRUSHUP_HARNESS = r"""
 const fs = require("fs");
 const vm = require("vm");
-
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET + r"""
 const htmlPath = process.argv[1];
-const html = fs.readFileSync(htmlPath, "utf8");
-const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error("index.html 内に <script> タグが見つかりません");
-const scriptCode = scriptMatch[1];
+const scriptCode = loadIndexScriptFromHtml(htmlPath);
 
 class MockClassList {
   constructor() { this.set = new Set(); }
@@ -371,28 +370,33 @@ class TestBrushupFeatures(unittest.TestCase):
         )
 
     def test_03_settings_modal_structure_and_no_inline_api_key_in_basic_card(self):
-        """APIキーと外観モードが設定モーダルに格納され、対象者名・カレンダー名はメイン画面に残ること"""
+        """基本設定・外観モード・APIキーが設定モーダルに統合され、メイン画面の基本設定セクションにはサマリー表示が残ること"""
         with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:
             html = f.read()
 
         self.assertIn('id="btn-open-settings"', html)
+        self.assertNotIn('id="btn-save-cfg"', html)
         self.assertIn('id="settings-modal"', html)
         self.assertIn('id="btn-toggle-api-key"', html)
         self.assertIn('id="icon-eye-open"', html)
         self.assertIn('id="icon-eye-off"', html)
 
-        # 設定モーダル内に外観モードとAPIキーが存在すること
+        # 設定モーダル内に基本設定（対象者名・登録先カレンダー）・外観モード・APIキー・シフト区分が存在すること
         modal_start = html.index('id="settings-modal"')
-        modal_html = html[modal_start:modal_start + 3000]
+        modal_html = html[modal_start:]
+        self.assertIn('id="target-name"', modal_html)
+        self.assertIn('id="calendar-name"', modal_html)
         self.assertIn('id="theme-selector"', modal_html)
         self.assertIn('id="api-key"', modal_html)
+        self.assertIn('id="settings-defs-list"', modal_html)
 
-        # 基本設定セクション内に対象者名・登録先カレンダーが残り、APIキーがないこと
+        # 基本設定セクション内には現在値サマリーと設定変更ボタンがあり、APIキーがないこと
         basic_start = html.index("<!-- Configuration Section -->")
         history_start = html.index("<!-- History Section")
         basic_html = html[basic_start:history_start]
-        self.assertIn('id="target-name"', basic_html)
-        self.assertIn('id="calendar-name"', basic_html)
+        self.assertIn('id="basic-summary-target-name"', basic_html)
+        self.assertIn('id="basic-summary-calendar-name"', basic_html)
+        self.assertIn('id="btn-open-basic-settings"', basic_html)
         self.assertNotIn('id="api-key"', basic_html)
 
     def test_04_quick_action_auto_analyze_and_api_key_visibility_toggle(self):
@@ -809,8 +813,9 @@ class TestBrushupFeatures(unittest.TestCase):
         harness = r"""
 const fs = require("fs");
 const vm = require("vm");
-const html = fs.readFileSync(process.argv[1], "utf8");
-const m = html.match(/function updateDewarpStatusBadge\(status\)\s*\{[\s\S]*?\n    \}/);
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET + r"""
+const scriptSrc = loadIndexScriptFromHtml(process.argv[1]);
+const m = scriptSrc.match(/function updateDewarpStatusBadge\(status\)\s*\{[\s\S]*?\n    \}/);
 if (!m) throw new Error("updateDewarpStatusBadge not found");
 const badge = {
   className: "",
@@ -852,10 +857,8 @@ console.log(JSON.stringify(states));
         e2e_harness = r"""
 const fs = require("fs");
 const vm = require("vm");
-
-const html = fs.readFileSync(process.argv[1], "utf8");
-const scriptMatch = html.match(/<script>([\s\S]*)<\/script>/);
-if (!scriptMatch) throw new Error("script block not found");
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET + r"""
+const scriptMatch = [null, loadIndexScriptFromHtml(process.argv[1])];
 
 class MockClassList {
   constructor(owner) { this.owner = owner; this.set = new Set(); }
@@ -1202,8 +1205,7 @@ vm.runInNewContext(scriptMatch[1], sandbox);
         self.assertIn("is-already", res["sFileAlready"]["classes"])
 
         # 10) CSS側でもデフォルト非表示・状態クラス時のみ表示(inline-flex)であることを保証
-        with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:
-            html_css = f.read()
+        html_css = load_index_html_with_assets(INDEX_HTML_PATH)
         self.assertRegex(html_css, r"\.dewarp-status-badge\s*\{[^}]*display:\s*none;")
         for cls in ("is-applied", "is-already", "is-not-applied", "is-processing"):
             self.assertRegex(
@@ -1298,10 +1300,8 @@ vm.runInNewContext(scriptMatch[1], sandbox);
         harness = r"""
 const fs = require("fs");
 const vm = require("vm");
-
-const html = fs.readFileSync(process.argv[1], "utf8");
-const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error("no script tag");
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET + r"""
+const scriptMatch = [null, loadIndexScriptFromHtml(process.argv[1])];
 
 class MockClassList {
   constructor() { this.set = new Set(); }

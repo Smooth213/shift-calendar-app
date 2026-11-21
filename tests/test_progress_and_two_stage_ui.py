@@ -5,17 +5,16 @@ import subprocess
 import unittest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from tests.dom_harness import JS_LOAD_INDEX_SCRIPT_SNIPPET, load_index_html_with_assets
+
 INDEX_HTML_PATH = os.path.join(PROJECT_ROOT, "index.html")
 
 NODE_TWO_STAGE_HARNESS = r"""
 const fs = require("fs");
 const vm = require("vm");
-
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET + r"""
 const htmlPath = process.argv[1];
-const html = fs.readFileSync(htmlPath, "utf8");
-const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error("index.html 内に <script> タグが見つかりません");
-const scriptCode = scriptMatch[1];
+const scriptCode = loadIndexScriptFromHtml(htmlPath);
 
 class MockClassList {
   constructor() { this.set = new Set(); }
@@ -326,8 +325,7 @@ vm.runInContext(scriptCode + `
 class TestProgressAndTwoStageUI(unittest.TestCase):
     def test_01_progress_bar_html_and_css_present(self):
         """プログレスバー・4ステップピル・行事再取得ボタンのHTML/CSS定義が存在すること"""
-        with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:
-            html = f.read()
+        html = load_index_html_with_assets(INDEX_HTML_PATH)
 
         required_tokens = [
             'id="analyze-progress-card"',

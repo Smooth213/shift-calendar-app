@@ -17,7 +17,7 @@ except ImportError:
         os.execv(_hb_py, [_hb_py] + sys.argv)
     raise
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from shift_calendar import config as _config_mod
 from shift_calendar import gemini_client as _gemini_mod
@@ -41,6 +41,7 @@ from shift_calendar.config import (
     _atomic_write_json,
     _atomic_write_text,
     get_local_ip,
+    validate_time_definitions,
 )
 from shift_calendar.domain import (
     _clamp_half_hour,
@@ -62,14 +63,41 @@ from shift_calendar.image_processing import (
     optimize_image_for_ai,
     snap_row_band_to_grid,
 )
+from shift_calendar.qr import render_qr_svg
 
 # ディレクトリと設定ファイルのパス（テストのモンキーパッチ対象）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 HISTORY_DIR = os.path.join(BASE_DIR, "history")
 MAX_UNREGISTERED_HISTORY = _storage_mod.MAX_UNREGISTERED_HISTORY
 MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024  # 50MB
 os.makedirs(HISTORY_DIR, exist_ok=True)
+
+_STATIC_MIME_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+}
+
+
+def _resolve_static_asset_path(rel_path):
+    """/static/<rel_path> が STATIC_DIR 配下の許可拡張子ファイルであることを検証する。"""
+    if not isinstance(rel_path, str) or not rel_path or "\x00" in rel_path:
+        return None, None
+    cleaned = rel_path.lstrip("/")
+    if not cleaned or "\\" in cleaned:
+        return None, None
+    static_root = os.path.realpath(STATIC_DIR)
+    candidate = os.path.realpath(os.path.join(static_root, cleaned))
+    if candidate == static_root or not candidate.startswith(static_root + os.sep):
+        return None, None
+    ext = os.path.splitext(candidate)[1].lower()
+    content_type = _STATIC_MIME_TYPES.get(ext)
+    if not content_type or not os.path.isfile(candidate):
+        return None, None
+    return candidate, content_type
 
 # 並行リクエスト保護用ロック（共有状態用）
 _STATE_LOCK = threading.RLock()
@@ -183,8 +211,22 @@ def update_history_shift_hourly_leave(hist_id, date_str, hours):
     )
 
 
+def update_history_shift(hist_id, date_str, updates):
+    return _storage_mod.update_history_shift(
+        HISTORY_DIR, hist_id, date_str, updates, load_config_fn=load_config
+    )
+
+
 def get_registered_calendar_shifts():
     return _storage_mod.get_registered_calendar_shifts(HISTORY_DIR)
+
+
+def export_history_backup_zip():
+    return _storage_mod.export_history_backup_zip(HISTORY_DIR, strftime_fn=time.strftime)
+
+
+def import_history_backup_zip(zip_bytes, overwrite=False):
+    return _storage_mod.import_history_backup_zip(HISTORY_DIR, zip_bytes, overwrite=overwrite)
 
 
 def load_config():
@@ -421,11 +463,61 @@ class RequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "履歴が見つかりません"}, 404)
 
+    def _handle_get_static(self, parsed):
+        rel = unquote(parsed.path[len("/static/"):])
+        fpath, content_type = _resolve_static_asset_path(rel)
+        if not fpath:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.end_headers()
+        with open(fpath, "rb") as f:
+            self.wfile.write(f.read())
+
+    def _handle_get_qr_svg(self, parsed):
+        qs = parse_qs(parsed.query)
+        raw_data = qs.get("data", [""])[0].strip()
+        if not raw_data:
+            raw_data = str(load_config().get("mobile_url") or "http://127.0.0.1:8765")
+        try:
+            svg = render_qr_svg(raw_data, border=4, size=220)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self._send_cors_headers()
+        self.end_headers()
+        self.wfile.write(svg.encode("utf-8"))
+
+    def _handle_get_history_backup(self, _parsed):
+        try:
+            zip_bytes = export_history_backup_zip()
+            fname = f"shift-calendar-backup-{time.strftime('%Y%m%d')}.zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(zip_bytes)
+        except Exception as e:
+            traceback.print_exc()
+            self._send_json({"error": str(e)}, 500)
+
     def do_GET(self):
         global LAST_HEARTBEAT
         with _STATE_LOCK:
             LAST_HEARTBEAT = time.time()
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/static/"):
+            self._handle_get_static(parsed)
+            return
         get_routes = {
             "/": lambda p: self._send_static_file("index.html", "text/html; charset=utf-8", no_cache=True),
             "/index.html": lambda p: self._send_static_file("index.html", "text/html; charset=utf-8", no_cache=True),
@@ -433,10 +525,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/favicon.png": lambda p: self._send_static_file("favicon.png", "image/png"),
             "/apple-touch-icon.png": lambda p: self._send_static_file("apple-touch-icon.png", "image/png"),
             "/api/config": self._handle_get_config,
+            "/api/qr.svg": self._handle_get_qr_svg,
             "/api/analyze_progress": lambda p: self._send_json(get_analyze_progress()),
             "/api/heartbeat": lambda p: self._send_json({"status": "alive"}),
             "/api/get_preloaded": self._handle_get_preloaded,
             "/api/history": lambda p: self._send_json({"history": get_history_list()}),
+            "/api/history/backup": self._handle_get_history_backup,
             "/api/calendar_shifts": lambda p: self._send_json(get_registered_calendar_shifts()),
             "/api/history/detail": self._handle_get_history_detail,
         }
@@ -460,8 +554,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             raw_data = self._parse_json_body(body)
             filtered = {k: v for k, v in raw_data.items() if k in ALLOWED_CONFIG_KEYS}
-            if "time_definitions" in filtered and not isinstance(filtered["time_definitions"], dict):
-                raise ValueError("time_definitions はオブジェクト形式で指定してください")
+            if "time_definitions" in filtered:
+                filtered["time_definitions"] = validate_time_definitions(filtered["time_definitions"])
             cfg = load_config()
             # 非ループバック端末からの空 api_key 送信で既存 API キーを上書き消失させない
             if "api_key" in filtered and not str(filtered.get("api_key") or "").strip():
@@ -708,6 +802,37 @@ class RequestHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
 
+    def _handle_post_calendar_shift_update(self, body):
+        try:
+            req_data = self._parse_json_body(body)
+            hist_id = req_data.get("history_id")
+            date_str = req_data.get("date")
+            sync_apple = bool(req_data.get("sync_apple_calendar", False))
+            cal_name = req_data.get("calendar_name") or load_config().get("calendar_name") or "シフトカレンダー"
+            include_events = bool(req_data.get("include_events", True))
+
+            updates = {}
+            for k in ("type", "status", "start_time", "end_time", "hourly_paid_leave", "event"):
+                if k in req_data:
+                    updates[k] = req_data.get(k)
+
+            updated_shift = update_history_shift(hist_id, date_str, updates)
+            synced = False
+            if sync_apple:
+                register_to_apple_calendar([updated_shift], cal_name, include_events=include_events)
+                synced = True
+
+            self._send_json({
+                "success": True,
+                "shift": updated_shift,
+                "apple_calendar_synced": synced,
+            })
+        except (ValueError, FileNotFoundError) as e:
+            self._send_json({"error": str(e)}, 400)
+        except Exception as e:
+            traceback.print_exc()
+            self._send_json({"error": str(e)}, 500)
+
     def _handle_post_history_save(self, body):
         try:
             data = self._parse_json_body(body)
@@ -725,6 +850,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             hist_id = data.get("id", "")
             success = delete_history(hist_id)
             self._send_json({"success": success})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+        except Exception as e:
+            traceback.print_exc()
+            self._send_json({"error": str(e)}, 500)
+
+    def _handle_post_history_restore(self, body):
+        try:
+            if not _is_loopback_client(getattr(self, "client_address", None)):
+                self._send_json({"error": "ローカル端末以外からの履歴復元は許可されていません"}, 403)
+                return
+            data = self._parse_json_body(body)
+            zip_b64 = data.get("zip_base64", "")
+            overwrite = bool(data.get("overwrite", False))
+            if not isinstance(zip_b64, str) or not zip_b64.strip():
+                raise ValueError("ZIPデータが指定されていません")
+            if "," in zip_b64:
+                zip_b64 = zip_b64.split(",", 1)[1]
+            try:
+                zip_bytes = base64.b64decode(zip_b64, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError("ZIPデータのBase64形式が不正です") from e
+            result = import_history_backup_zip(zip_bytes, overwrite=overwrite)
+            self._send_json({"success": True, **result})
         except ValueError as e:
             self._send_json({"error": str(e)}, 400)
         except Exception as e:
@@ -758,8 +907,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/api/preload": self._handle_post_preload,
             "/api/dewarp_preview": self._handle_post_dewarp_preview,
             "/api/calendar_shifts/hourly_leave": self._handle_post_hourly_leave,
+            "/api/calendar_shifts/update": self._handle_post_calendar_shift_update,
             "/api/history/save": self._handle_post_history_save,
             "/api/history/delete": self._handle_post_history_delete,
+            "/api/history/restore": self._handle_post_history_restore,
             "/api/shutdown": self._handle_post_shutdown,
         }
         handler = post_routes.get(parsed.path)

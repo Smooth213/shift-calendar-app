@@ -14,6 +14,8 @@ if PROJECT_ROOT not in sys.path:
 
 import app as shift_app
 
+from tests.dom_harness import JS_LOAD_INDEX_SCRIPT_SNIPPET
+
 INDEX_HTML_PATH = os.path.join(PROJECT_ROOT, "index.html")
 
 
@@ -21,10 +23,8 @@ def _build_calendar_node_harness(test_body_js):
     return r"""
 const fs = require("fs");
 const vm = require("vm");
-
-const html = fs.readFileSync(process.argv[1], "utf8");
-const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error("no script tag");
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET + r"""
+const scriptMatch = [null, loadIndexScriptFromHtml(process.argv[1])];
 
 class MockClassList {
   constructor() { this.set = new Set(); }
@@ -661,10 +661,8 @@ class TestCalendarTab(unittest.TestCase):
         harness = r"""
 const fs = require("fs");
 const vm = require("vm");
-
-const html = fs.readFileSync(process.argv[1], "utf8");
-const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error("no script tag");
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET + r"""
+const scriptMatch = [null, loadIndexScriptFromHtml(process.argv[1])];
 
 class MockClassList {
   constructor() { this.set = new Set(); }

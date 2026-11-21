@@ -220,7 +220,30 @@ def build_apple_calendar_script(shifts, calendar_name="シフトカレンダー"
     return full_script, event_count
 
 
-def register_to_apple_calendar(shifts, calendar_name="シフトカレンダー", include_events=True):
+DEFAULT_OSASCRIPT_TIMEOUT_SEC = 60
+
+
+def _format_osascript_error(stderr_text):
+    """osascript のエラー出力をユーザー向けの分かりやすいメッセージへ整形する。"""
+    raw = str(stderr_text or "").strip()
+    lower = raw.lower()
+    if (
+        "-1743" in raw
+        or "not authorized" in lower
+        or "not permitted" in lower
+        or "permission" in lower
+        or "権限" in raw
+    ):
+        return (
+            "Appleカレンダーへのアクセス権限がありません。"
+            "macOSの「システム設定 → プライバシーとセキュリティ → オートメーション」から"
+            "カレンダー操作の許可を有効にしてください。"
+            + (f"（詳細: {raw}）" if raw else "")
+        )
+    return f"カレンダー登録エラー: {raw or 'osascript の実行に失敗しました'}"
+
+
+def register_to_apple_calendar(shifts, calendar_name="シフトカレンダー", include_events=True, timeout=DEFAULT_OSASCRIPT_TIMEOUT_SEC):
     if not shifts:
         return 0, "登録対象のシフトがありません"
 
@@ -232,9 +255,15 @@ def register_to_apple_calendar(shifts, calendar_name="シフトカレンダー",
         temp_path = tf.name
 
     try:
-        res = subprocess.run(["osascript", temp_path], capture_output=True, text=True)
+        try:
+            res = subprocess.run(["osascript", temp_path], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Appleカレンダーへの登録がタイムアウトしました（{timeout}秒）。"
+                "カレンダーアプリのアクセス許可ダイアログが表示されていないか確認し、再度お試しください。"
+            ) from exc
         if res.returncode != 0:
-            raise RuntimeError(f"カレンダー登録エラー: {res.stderr.strip()}")
+            raise RuntimeError(_format_osascript_error(res.stderr))
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)

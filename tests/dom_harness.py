@@ -9,14 +9,69 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_HTML_PATH = os.path.join(PROJECT_ROOT, "index.html")
 
 
+JS_LOAD_INDEX_SCRIPT_SNIPPET = r"""
+function loadIndexScriptFromHtml(htmlPath) {
+  const pathMod = require("path");
+  const baseDir = pathMod.dirname(pathMod.resolve(htmlPath));
+  const html = fs.readFileSync(htmlPath, "utf8");
+  const chunks = [];
+  const re = /<script(?:\s+[^>]*?src=["']([^"']+)["'][^>]*)?>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const src = (m[1] || "").trim();
+    const inlineBody = m[2] || "";
+    if (src) {
+      const rel = src.replace(/^\/+/, "");
+      const fullPath = pathMod.join(baseDir, rel);
+      chunks.push(fs.readFileSync(fullPath, "utf8"));
+    } else if (inlineBody.trim()) {
+      chunks.push(inlineBody);
+    }
+  }
+  if (!chunks.length) throw new Error("index.html 内に <script> タグが見つかりません");
+  return chunks.join("\n;\n");
+}
+"""
+
+
 def extract_index_script(html_path=INDEX_HTML_PATH):
-    """index.html 内の <script>...</script> ブロックを抽出して返す。"""
+    """index.html 内の外部 <script src="/static/..."> およびインライン <script> を出現順に結合して返す。"""
+    base_dir = os.path.dirname(os.path.abspath(html_path))
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
-    m = re.search(r"<script>([\s\S]*?)</script>", html)
-    if not m:
+    chunks = []
+    pattern = re.compile(r'<script(?:\s+[^>]*?src=["\']([^"\']+)["\'][^>]*)?>([\s\S]*?)</script>', re.IGNORECASE)
+    for m in pattern.finditer(html):
+        src = (m.group(1) or "").strip()
+        inline_body = m.group(2) or ""
+        if src:
+            rel = src.lstrip("/")
+            full_path = os.path.join(base_dir, rel)
+            with open(full_path, "r", encoding="utf-8") as sf:
+                chunks.append(sf.read())
+        elif inline_body.strip():
+            chunks.append(inline_body)
+    if not chunks:
         raise ValueError("index.html 内に <script> タグが見つかりません")
-    return m.group(1)
+    return "\n;\n".join(chunks)
+
+
+def load_index_html_with_assets(html_path=INDEX_HTML_PATH):
+    """index.html と参照されているローカルCSSファイルの内容を結合して返す。"""
+    base_dir = os.path.dirname(os.path.abspath(html_path))
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    css_chunks = []
+    for m in re.finditer(r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\']', html, re.IGNORECASE):
+        href = m.group(1).strip()
+        if href.startswith("/"):
+            css_path = os.path.join(base_dir, href.lstrip("/"))
+            if os.path.isfile(css_path):
+                with open(css_path, "r", encoding="utf-8") as cf:
+                    css_chunks.append(cf.read())
+    if css_chunks:
+        return html + "\n/* === EXTERNAL CSS === */\n" + "\n".join(css_chunks)
+    return html
 
 
 def check_index_js_syntax(html_path=INDEX_HTML_PATH):
@@ -153,13 +208,11 @@ function createIndexContext(fetchImpl) {
     confirm: () => true,
     getEl,
   });
-  const html = fs.readFileSync(process.argv[1], "utf8");
-  const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-  if (!scriptMatch) throw new Error("no script tag");
-  vm.runInContext(scriptMatch[1], ctx);
+  const scriptCode = loadIndexScriptFromHtml(process.argv[1]);
+  vm.runInContext(scriptCode, ctx);
   return ctx;
 }
-"""
+""" + JS_LOAD_INDEX_SCRIPT_SNIPPET
 
 
 def run_node_harness(test_body_js, html_path=INDEX_HTML_PATH):
