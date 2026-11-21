@@ -7,8 +7,8 @@ import urllib.request
 import cv2
 import numpy as np
 
-from shift_calendar.calendar_export import split_event_and_skipped_holidays
 from shift_calendar.config import DEFAULT_TIME_DEFINITIONS
+from shift_calendar.domain import split_event_and_skipped_holidays
 from shift_calendar.image_processing import (
     build_labeled_event_strip,
     build_labeled_name_column_image,

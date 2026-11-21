@@ -4,6 +4,98 @@ config / storage / calendar_export / gemini_client から一方向で参照さ�
 低レイヤーの純粋関数を集約する。
 """
 import re
+import unicodedata
+
+
+# Googleカレンダー「日本の祝日（その他の行事を含む）」相当の除外対象（正規化後キー）
+_CALENDAR_HOLIDAY_RAW_NAMES = (
+    # 国民の祝日・休日（18種＋表記揺れ・略称）
+    "元日", "元旦",
+    "成人の日",
+    "建国記念の日", "建国記念日",
+    "天皇誕生日",
+    "春分の日",
+    "昭和の日",
+    "憲法記念日",
+    "みどりの日", "緑の日",
+    "こどもの日", "子供の日", "子どもの日", "端午の節句",
+    "海の日",
+    "山の日",
+    "敬老の日",
+    "秋分の日",
+    "スポーツの日", "体育の日",
+    "文化の日",
+    "勤労感謝の日",
+    "振替休日", "振り替え休日", "振休",
+    "国民の休日",
+    # Googleカレンダー「日本の祝日（その他の行事を含む）」の主な標準行事・表記揺れ
+    "銀行休業日",
+    "節分",
+    "バレンタインデー", "バレンタイン", "valentine", "valentineday", "valentinesday",
+    "ひな祭り", "ひなまつり", "雛祭り", "雛まつり", "桃の節句",
+    "母の日",
+    "父の日",
+    "七夕", "たなばた",
+    "ハロウィン", "ハロウィーン", "halloween",
+    "七五三",
+    "クリスマスイブ", "クリスマスイヴ", "xmasイブ", "xmasイヴ", "xmaseve", "christmaseve",
+    "クリスマス", "xmas", "christmas",
+    "大晦日", "大みそか", "おおみそか",
+)
+
+
+def _normalize_holiday_key(text):
+    """全角/半角・大文字/小文字・記号ゆれ・よくあるOCR誤字を吸収して照合用キーへ正規化する。"""
+    s = unicodedata.normalize("NFKC", str(text or "")).strip().lower()
+    # 縦書きOCRで起こりやすい誤字の正規化（「曰」→「日」）
+    s = s.replace("曰", "日")
+    # 括弧・引用符・空白・中黒・ドット・ハイフン等の区切り記号を除去（カタカナ長音「ー」は保持）
+    s = re.sub(r"[\s'’\"`.,・/／\-‐‑–—()（）【】\[\]「」『』!！?？]+", "", s)
+    return s
+
+
+CALENDAR_HOLIDAY_EXCLUDED_KEYS = frozenset(
+    _normalize_holiday_key(name) for name in _CALENDAR_HOLIDAY_RAW_NAMES
+)
+
+
+def split_event_and_skipped_holidays(event_text):
+    """
+    行事テキストを「残すべき職場行事」と「スキップした祝日・標準行事リスト」へ分離する。
+    - 単体で祝日/一般歳時記に一致する場合は ("", [raw]) を返す。
+    - 併記されている場合（例: 「敬老の日・敬老会」「クリスマス / クリスマス会」）は
+      祝日側のみを skipped へ移し、職場・施設固有の行事（「敬老会」「クリスマス会」）を保持する。
+    - 「クリスマス会」「敬老会」などの職場イベント単体は完全一致しないため誤除外しない。
+    """
+    raw = str(event_text or "").strip()
+    if not raw:
+        return "", []
+    if _normalize_holiday_key(raw) in CALENDAR_HOLIDAY_EXCLUDED_KEYS:
+        return "", [raw]
+
+    # 区切り文字で複数要素が併記されている場合はトークン単位で祝日のみ除外
+    parts = [p.strip() for p in re.split(r"[・/／、,\n\r\t　 ]+", raw) if p.strip()]
+    if len(parts) > 1:
+        kept = []
+        skipped = []
+        for p in parts:
+            if _normalize_holiday_key(p) in CALENDAR_HOLIDAY_EXCLUDED_KEYS:
+                skipped.append(p)
+            else:
+                kept.append(p)
+        if not kept:
+            return "", skipped
+        if skipped:
+            return "・".join(kept), skipped
+    return raw, []
+
+
+def clean_event_text_excluding_holidays(event_text):
+    """
+    Googleカレンダー「日本の祝日（その他の行事を含む）」と重複する祝日・一般歳時記を除外したテキストを返す。
+    """
+    kept, _ = split_event_and_skipped_holidays(event_text)
+    return kept
 
 
 def clamp_int(val, default, min_val, max_val):

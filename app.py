@@ -1,4 +1,5 @@
 import base64
+import binascii
 import json
 import mimetypes
 import os
@@ -33,6 +34,7 @@ from shift_calendar.calendar_export import (
     split_event_and_skipped_holidays,
 )
 from shift_calendar.config import (
+    ALLOWED_CONFIG_KEYS,
     DEFAULT_TIME_DEFINITIONS,
     _CONFIG_RUNTIME_KEYS,
     _STORAGE_LOCK,
@@ -444,17 +446,29 @@ class RequestHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def _handle_post_config(self, body):
+    def _parse_json_body(self, body):
+        """リクエストボディをJSONオブジェクト(dict)としてデコードする。不正時は ValueError。"""
         try:
             data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError(f"JSONの形式が不正です: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError("JSONオブジェクトを指定してください")
+        return data
+
+    def _handle_post_config(self, body):
+        try:
+            raw_data = self._parse_json_body(body)
+            filtered = {k: v for k, v in raw_data.items() if k in ALLOWED_CONFIG_KEYS}
+            if "time_definitions" in filtered and not isinstance(filtered["time_definitions"], dict):
+                raise ValueError("time_definitions はオブジェクト形式で指定してください")
             cfg = load_config()
             # 非ループバック端末からの空 api_key 送信で既存 API キーを上書き消失させない
-            if "api_key" in data and not str(data.get("api_key") or "").strip():
+            if "api_key" in filtered and not str(filtered.get("api_key") or "").strip():
                 client_addr = getattr(self, "client_address", None)
                 if client_addr and not _is_loopback_client(client_addr):
-                    data = dict(data)
-                    data.pop("api_key", None)
-            cfg.update(data)
+                    filtered.pop("api_key", None)
+            cfg.update(filtered)
             cfg["paid_leave_start_month"] = _clamp_int(cfg.get("paid_leave_start_month"), 4, 1, 12)
             cfg["paid_leave_start_day"] = _clamp_int(cfg.get("paid_leave_start_day"), 1, 1, 31)
             cfg["paid_leave_annual_days"] = _clamp_int(cfg.get("paid_leave_annual_days"), 20, 0, 365)
@@ -466,12 +480,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             if client_addr and not _is_loopback_client(client_addr):
                 resp_cfg["api_key"] = ""
             self._send_json({"success": True, "config": resp_cfg})
-        except Exception as e:
+        except ValueError as e:
             self._send_json({"error": str(e)}, 400)
+        except Exception as e:
+            traceback.print_exc()
+            self._send_json({"error": str(e)}, 500)
 
     def _handle_post_analyze(self, body):
         try:
-            req_data = json.loads(body.decode("utf-8"))
+            req_data = self._parse_json_body(body)
             image_data = req_data.get("image_base64")
             mime_type = req_data.get("mime_type", "image/jpeg")
             target_name = req_data.get("target_name") or "皿田"
@@ -480,7 +497,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             if not api_key:
                 raise ValueError("APIキーが設定されていません")
-            if not image_data:
+            if not image_data or not isinstance(image_data, str):
                 raise ValueError("画像データがありません")
 
             if "," in image_data:
@@ -490,7 +507,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 elif "image/jpeg" in header or "image/jpg" in header:
                     mime_type = "image/jpeg"
 
-            raw_bytes = base64.b64decode(image_data)
+            try:
+                raw_bytes = base64.b64decode(image_data, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError("画像データのBase64形式が不正です") from e
             with _STATE_LOCK:
                 if PRELOADED_IMAGE and PRELOADED_IMAGE.get("auto_analyze"):
                     PRELOADED_IMAGE["auto_analyze"] = False
@@ -506,6 +526,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                         PRELOADED_IMAGE["file_size"] = len(result["corrected_image_base64"])
 
             self._send_json({"success": True, "data": result})
+        except ValueError as e:
+            set_analyze_progress(0, "解析エラー", str(e), step=3, active=False)
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             set_analyze_progress(0, "解析エラー", str(e), step=3, active=False)
@@ -513,18 +536,24 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_post_analyze_events(self, body):
         try:
-            req_data = json.loads(body.decode("utf-8"))
+            req_data = self._parse_json_body(body)
             image_data = req_data.get("image_base64")
             api_key = req_data.get("api_key") or load_config().get("api_key")
             if not api_key:
                 raise ValueError("APIキーが設定されていません")
-            if not image_data:
+            if not image_data or not isinstance(image_data, str):
                 raise ValueError("画像データがありません")
             if "," in image_data:
                 _, image_data = image_data.split(",", 1)
-            raw_bytes = base64.b64decode(image_data)
+            try:
+                raw_bytes = base64.b64decode(image_data, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError("画像データのBase64形式が不正です") from e
             ev_result = analyze_events_only(api_key, raw_bytes)
             self._send_json({"success": True, "data": ev_result})
+        except ValueError as e:
+            set_analyze_progress(100, "行事予定の読み取りに失敗しました", str(e), step=4, active=False)
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             set_analyze_progress(100, "行事予定の読み取りに失敗しました", str(e), step=4, active=False)
@@ -532,8 +561,10 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_post_register(self, body):
         try:
-            req_data = json.loads(body.decode("utf-8"))
+            req_data = self._parse_json_body(body)
             shifts = req_data.get("shifts", [])
+            if not isinstance(shifts, list):
+                raise ValueError("shifts は配列形式で指定してください")
             cal_name = req_data.get("calendar_name") or "シフトカレンダー"
             include_events = bool(req_data.get("include_events", True))
             history_id = req_data.get("history_id")
@@ -555,14 +586,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "history_id": updated_hist_id,
                 "registered_at": registered_at,
             })
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
 
     def _handle_post_export_ics(self, body):
         try:
-            req_data = json.loads(body.decode("utf-8"))
+            req_data = self._parse_json_body(body)
             shifts = req_data.get("shifts", [])
+            if not isinstance(shifts, list):
+                raise ValueError("shifts は配列形式で指定してください")
             cal_name = req_data.get("calendar_name") or "シフトカレンダー"
             include_events = bool(req_data.get("include_events", True))
 
@@ -573,6 +608,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_cors_headers()
             self.end_headers()
             self.wfile.write(ics_content.encode("utf-8"))
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
@@ -583,7 +620,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             if not _is_loopback_client(getattr(self, "client_address", None)):
                 self._send_json({"error": "ローカル端末以外からのプリロードは許可されていません"}, 403)
                 return
-            data = json.loads(body.decode("utf-8"))
+            data = self._parse_json_body(body)
             file_path = data.get("file_path", "")
             ok, resolved_or_err = _validate_preload_file_path(file_path)
             if not ok:
@@ -614,30 +651,39 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "dewarp_status": dewarp_status,
                 }
             self._send_json({"success": True, "file_name": fname})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
 
     def _handle_post_dewarp_preview(self, body):
         try:
-            data = json.loads(body.decode("utf-8"))
+            data = self._parse_json_body(body)
             img_b64 = data.get("image_base64", "")
+            if not isinstance(img_b64, str) or not img_b64:
+                raise ValueError("画像データがありません")
             if "," in img_b64:
                 img_b64 = img_b64.split(",", 1)[1]
-            raw = base64.b64decode(img_b64)
+            try:
+                raw = base64.b64decode(img_b64, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError("画像データのBase64形式が不正です") from e
             _proc_bytes, corr_b64, dewarp_status = dewarp_table_image_with_status(raw)
             self._send_json({
                 "success": True,
                 "corrected_image_base64": corr_b64 or data.get("image_base64"),
                 "dewarp_status": dewarp_status,
             })
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
 
     def _handle_post_hourly_leave(self, body):
         try:
-            req_data = json.loads(body.decode("utf-8"))
+            req_data = self._parse_json_body(body)
             hist_id = req_data.get("history_id")
             date_str = req_data.get("date")
             hours = req_data.get("hourly_paid_leave", 0)
@@ -664,19 +710,23 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _handle_post_history_save(self, body):
         try:
-            data = json.loads(body.decode("utf-8"))
+            data = self._parse_json_body(body)
             hist_id = save_history(data)
             self._send_json({"success": True, "id": hist_id})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)
 
     def _handle_post_history_delete(self, body):
         try:
-            data = json.loads(body.decode("utf-8"))
+            data = self._parse_json_body(body)
             hist_id = data.get("id", "")
             success = delete_history(hist_id)
             self._send_json({"success": success})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()
             self._send_json({"error": str(e)}, 500)

@@ -12,6 +12,57 @@ from shift_calendar.domain import (
 
 MAX_UNREGISTERED_HISTORY = 5
 
+# 履歴JSONの軽量メタデータキャッシュ: {abs_history_dir: {fname: (mtime_ns, size, parsed_dict)}}
+_HISTORY_JSON_CACHE = {}
+
+
+def _load_cached_history_records(history_dir):
+    """history_dir 内の .json ファイルを (mtime_ns, size) 指紋付きでキャッシュ読込する。
+    呼び出し元は _STORAGE_LOCK を保持していること。
+    """
+    abs_dir = os.path.abspath(history_dir)
+    if not os.path.isdir(abs_dir):
+        _HISTORY_JSON_CACHE.pop(abs_dir, None)
+        return []
+
+    dir_cache = _HISTORY_JSON_CACHE.setdefault(abs_dir, {})
+    seen_fnames = set()
+    records = []
+
+    with os.scandir(abs_dir) as it:
+        for entry in it:
+            if not entry.name.endswith(".json") or not entry.is_file():
+                continue
+            fname = entry.name
+            seen_fnames.add(fname)
+            try:
+                st = entry.stat()
+                sig = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                continue
+
+            cached = dir_cache.get(fname)
+            if cached is not None and cached[0] == sig[0] and cached[1] == sig[1]:
+                records.append((fname, cached[2]))
+                continue
+
+            try:
+                with open(entry.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    dir_cache[fname] = (sig[0], sig[1], data)
+                    records.append((fname, data))
+                else:
+                    dir_cache.pop(fname, None)
+            except Exception:
+                dir_cache.pop(fname, None)
+
+    for stale in list(dir_cache.keys()):
+        if stale not in seen_fnames:
+            dir_cache.pop(stale, None)
+
+    return records
+
 
 def get_history_images_dir(history_dir):
     """history_dir に対応する兄弟画像ディレクトリ（例: history -> history_images）を返す。"""
@@ -128,28 +179,19 @@ def prune_unregistered_history(history_dir, max_keep=MAX_UNREGISTERED_HISTORY):
 def get_history_list(history_dir):
     with _STORAGE_LOCK:
         items = []
-        if not os.path.exists(history_dir):
-            return items
-        for fname in sorted(os.listdir(history_dir), reverse=True):
-            if fname.endswith(".json"):
-                fpath = os.path.join(history_dir, fname)
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        has_img = bool(data.get("image_base64") or data.get("image_file") or data.get("has_image"))
-                        items.append({
-                            "id": data.get("id", fname[:-5]),
-                            "title": data.get("title", "シフト"),
-                            "created_at": data.get("created_at", ""),
-                            "registered": bool(data.get("registered", False)),
-                            "registered_at": data.get("registered_at", ""),
-                            "target_name": data.get("target_name", "皿田"),
-                            "shifts_count": len(data.get("shifts", [])),
-                            "has_image": has_img,
-                            "image_name": data.get("image_name", ""),
-                        })
-                except Exception:
-                    pass
+        for fname, data in _load_cached_history_records(history_dir):
+            has_img = bool(data.get("image_base64") or data.get("image_file") or data.get("has_image"))
+            items.append({
+                "id": data.get("id", fname[:-5]),
+                "title": data.get("title", "シフト"),
+                "created_at": data.get("created_at", ""),
+                "registered": bool(data.get("registered", False)),
+                "registered_at": data.get("registered_at", ""),
+                "target_name": data.get("target_name", "皿田"),
+                "shifts_count": len(data.get("shifts", [])),
+                "has_image": has_img,
+                "image_name": data.get("image_name", ""),
+            })
         items.sort(key=lambda x: (x.get("registered_at") or x.get("created_at") or "", x.get("id") or ""), reverse=True)
         return items
 
@@ -336,23 +378,14 @@ def get_registered_calendar_shifts(history_dir):
     """
     with _STORAGE_LOCK:
         registered_records = []
-        if os.path.exists(history_dir):
-            for fname in sorted(os.listdir(history_dir)):
-                if not fname.endswith(".json"):
-                    continue
-                fpath = os.path.join(history_dir, fname)
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if not isinstance(data, dict) or not bool(data.get("registered", False)):
-                        continue
-                    hist_id = str(data.get("id") or fname[:-5])
-                    reg_at = str(data.get("registered_at") or "")
-                    created_at = str(data.get("created_at") or "")
-                    sort_key = (reg_at or created_at, hist_id)
-                    registered_records.append((sort_key, hist_id, data))
-                except Exception:
-                    continue
+        for fname, data in _load_cached_history_records(history_dir):
+            if not bool(data.get("registered", False)):
+                continue
+            hist_id = str(data.get("id") or fname[:-5])
+            reg_at = str(data.get("registered_at") or "")
+            created_at = str(data.get("created_at") or "")
+            sort_key = (reg_at or created_at, hist_id)
+            registered_records.append((sort_key, hist_id, data))
 
         registered_records.sort(key=lambda x: x[0])
 

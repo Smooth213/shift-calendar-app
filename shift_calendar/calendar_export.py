@@ -1,136 +1,63 @@
 import os
-import re
 import subprocess
 import tempfile
-import unicodedata
+from datetime import datetime, timedelta
 
 from shift_calendar.domain import (
+    CALENDAR_HOLIDAY_EXCLUDED_KEYS,
+    _CALENDAR_HOLIDAY_RAW_NAMES,
     _clamp_half_hour,
+    _normalize_holiday_key,
     apply_hourly_leave_to_summary,
-    format_hourly_leave_hours,
+    clean_event_text_excluding_holidays,
+    split_event_and_skipped_holidays,
 )
 
 
-
-
-# Googleカレンダー「日本の祝日（その他の行事を含む）」相当の除外対象（正規化後キー）
-_CALENDAR_HOLIDAY_RAW_NAMES = (
-    # 国民の祝日・休日（18種＋表記揺れ・略称）
-    "元日", "元旦",
-    "成人の日",
-    "建国記念の日", "建国記念日",
-    "天皇誕生日",
-    "春分の日",
-    "昭和の日",
-    "憲法記念日",
-    "みどりの日", "緑の日",
-    "こどもの日", "子供の日", "子どもの日", "端午の節句",
-    "海の日",
-    "山の日",
-    "敬老の日",
-    "秋分の日",
-    "スポーツの日", "体育の日",
-    "文化の日",
-    "勤労感謝の日",
-    "振替休日", "振り替え休日", "振休",
-    "国民の休日",
-    # Googleカレンダー「日本の祝日（その他の行事を含む）」の主な標準行事・表記揺れ
-    "銀行休業日",
-    "節分",
-    "バレンタインデー", "バレンタイン", "valentine", "valentineday", "valentinesday",
-    "ひな祭り", "ひなまつり", "雛祭り", "雛まつり", "桃の節句",
-    "母の日",
-    "父の日",
-    "七夕", "たなばた",
-    "ハロウィン", "ハロウィーン", "halloween",
-    "七五三",
-    "クリスマスイブ", "クリスマスイヴ", "xmasイブ", "xmasイヴ", "xmaseve", "christmaseve",
-    "クリスマス", "xmas", "christmas",
-    "大晦日", "大みそか", "おおみそか",
-)
-
-
-def _normalize_holiday_key(text):
-    """全角/半角・大文字/小文字・記号ゆれ・よくあるOCR誤字を吸収して照合用キーへ正規化する。"""
-    s = unicodedata.normalize("NFKC", str(text or "")).strip().lower()
-    # 縦書きOCRで起こりやすい誤字の正規化（「曰」→「日」）
-    s = s.replace("曰", "日")
-    # 括弧・引用符・空白・中黒・ドット・ハイフン等の区切り記号を除去（カタカナ長音「ー」は保持）
-    s = re.sub(r"[\s'’\"`.,・/／\-‐‑–—()（）【】\[\]「」『』!！?？]+", "", s)
+def _escape_ics_text(text):
+    """RFC 5545 Section 3.3.11 に従い ICS TEXT 値の特殊文字をエスケープする。"""
+    s = str(text or "")
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = s.replace("\\", "\\\\")
+    s = s.replace(";", "\\;")
+    s = s.replace(",", "\\,")
+    s = s.replace("\n", "\\n")
     return s
 
 
-CALENDAR_HOLIDAY_EXCLUDED_KEYS = frozenset(
-    _normalize_holiday_key(name) for name in _CALENDAR_HOLIDAY_RAW_NAMES
-)
-
-
-def split_event_and_skipped_holidays(event_text):
-    """
-    行事テキストを「残すべき職場行事」と「スキップした祝日・標準行事リスト」へ分離する。
-    - 単体で祝日/一般歳時記に一致する場合は ("", [raw]) を返す。
-    - 併記されている場合（例: 「敬老の日・敬老会」「クリスマス / クリスマス会」）は
-      祝日側のみを skipped へ移し、職場・施設固有の行事（「敬老会」「クリスマス会」）を保持する。
-    - 「クリスマス会」「敬老会」などの職場イベント単体は完全一致しないため誤除外しない。
-    """
-    raw = str(event_text or "").strip()
-    if not raw:
-        return "", []
-    if _normalize_holiday_key(raw) in CALENDAR_HOLIDAY_EXCLUDED_KEYS:
-        return "", [raw]
-
-    # 区切り文字で複数要素が併記されている場合はトークン単位で祝日のみ除外
-    parts = [p.strip() for p in re.split(r"[・/／、,\n\r\t　 ]+", raw) if p.strip()]
-    if len(parts) > 1:
-        kept = []
-        skipped = []
-        for p in parts:
-            if _normalize_holiday_key(p) in CALENDAR_HOLIDAY_EXCLUDED_KEYS:
-                skipped.append(p)
-            else:
-                kept.append(p)
-        if not kept:
-            return "", skipped
-        if skipped:
-            return "・".join(kept), skipped
-    return raw, []
-
-
-def clean_event_text_excluding_holidays(event_text):
-    """
-    Googleカレンダー「日本の祝日（その他の行事を含む）」と重複する祝日・一般歳時記を除外したテキストを返す。
-    """
-    kept, _ = split_event_and_skipped_holidays(event_text)
-    return kept
+def _prepare_shift_export_fields(shift):
+    """シフト1件から出力共通の (is_allday, summary) を算出する。"""
+    status = shift.get("status")
+    is_allday = bool(status in ("holiday", "paid_leave") or shift.get("is_holiday") or shift.get("is_paid_leave"))
+    raw_summary = shift.get("summary") or shift.get("type") or "シフト"
+    if not is_allday:
+        h_leave = _clamp_half_hour(shift.get("hourly_paid_leave"), 0.0, 0.0, 23.5)
+        if h_leave > 0.0:
+            raw_summary = apply_hourly_leave_to_summary(raw_summary, h_leave, "work")
+    return is_allday, raw_summary
 
 
 def create_ics(shifts, calendar_name="シフトカレンダー", include_events=True):
-    from datetime import datetime, timedelta
     ics_lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//Shift Calendar Importer//JP",
-        f"X-WR-CALNAME:{calendar_name}",
+        f"X-WR-CALNAME:{_escape_ics_text(calendar_name)}",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH"
     ]
-    for idx, s in enumerate(shifts):
+    for s in shifts:
         date_str = s["date"].replace("-", "")
-        status = s.get("status")
-        is_allday = status in ("holiday", "paid_leave") or s.get("is_holiday") or s.get("is_paid_leave")
-        raw_summary = s.get("summary") or s.get("type") or "シフト"
-        if not is_allday:
-            h_leave = _clamp_half_hour(s.get("hourly_paid_leave"), 0.0, 0.0, 23.5)
-            if h_leave > 0.0:
-                raw_summary = apply_hourly_leave_to_summary(raw_summary, h_leave, "work")
-        summary = raw_summary
+        is_allday, raw_summary = _prepare_shift_export_fields(s)
+        summary = _escape_ics_text(raw_summary)
+        shift_type = _escape_ics_text(s.get("type") or "")
         uid = f"shift-{date_str}@shift-calendar-app"
 
         dt = datetime.strptime(s["date"], "%Y-%m-%d")
         next_date_str = (dt + timedelta(days=1)).strftime("%Y%m%d")
 
         # 終日イベント（休み・有給休暇）
-        if status in ("holiday", "paid_leave") or s.get("is_holiday") or s.get("is_paid_leave"):
+        if is_allday:
             ics_lines.extend([
                 "BEGIN:VEVENT",
                 f"UID:{uid}",
@@ -138,7 +65,7 @@ def create_ics(shifts, calendar_name="シフトカレンダー", include_events=
                 f"DTSTART;VALUE=DATE:{date_str}",
                 f"DTEND;VALUE=DATE:{next_date_str}",
                 f"SUMMARY:{summary}",
-                f"DESCRIPTION:区分: {s.get('type')}",
+                f"DESCRIPTION:区分: {shift_type}",
                 "END:VEVENT"
             ])
         # 時間指定の出勤イベント
@@ -154,7 +81,7 @@ def create_ics(shifts, calendar_name="シフトカレンダー", include_events=
                 f"DTSTART;TZID=Asia/Tokyo:{dtstart}",
                 f"DTEND;TZID=Asia/Tokyo:{dtend}",
                 f"SUMMARY:{summary}",
-                f"DESCRIPTION:シフト区分: {s.get('type')}",
+                f"DESCRIPTION:シフト区分: {shift_type}",
                 "END:VEVENT"
             ])
 
@@ -168,7 +95,7 @@ def create_ics(shifts, calendar_name="シフトカレンダー", include_events=
                 f"DTSTAMP:{date_str}T000000Z",
                 f"DTSTART;VALUE=DATE:{date_str}",
                 f"DTEND;VALUE=DATE:{next_date_str}",
-                f"SUMMARY:{event_text}",
+                f"SUMMARY:{_escape_ics_text(event_text)}",
                 "DESCRIPTION:行事予定",
                 "END:VEVENT"
             ])
@@ -186,13 +113,7 @@ def build_apple_calendar_script(shifts, calendar_name="シフトカレンダー"
     event_count = 0
     for s in shifts:
         d = s["date"] # YYYY-MM-DD
-        status = s.get("status")
-        is_allday = status in ("holiday", "paid_leave") or s.get("is_holiday") or s.get("is_paid_leave")
-        raw_summary = s.get("summary") or s.get("type") or "シフト"
-        if not is_allday:
-            h_leave = _clamp_half_hour(s.get("hourly_paid_leave"), 0.0, 0.0, 23.5)
-            if h_leave > 0.0:
-                raw_summary = apply_hourly_leave_to_summary(raw_summary, h_leave, "work")
+        is_allday, raw_summary = _prepare_shift_export_fields(s)
         summary = _escape_applescript_str(raw_summary)
         shift_type = _escape_applescript_str(s.get("type") or "")
         event_text = _escape_applescript_str(s.get("event") or "")
@@ -230,7 +151,7 @@ def build_apple_calendar_script(shifts, calendar_name="シフトカレンダー"
         created_shift = False
 
         # 終日イベント（休み・有給）
-        if status in ("holiday", "paid_leave") or s.get("is_holiday") or s.get("is_paid_leave"):
+        if is_allday:
             day_commands.append(
                 f'make new event at end of events of theCal with properties {{summary:"{summary}", start date:evStart, end date:evEnd, allday event:true, description:"区分: {shift_type}"}}'
             )
@@ -306,7 +227,6 @@ def register_to_apple_calendar(shifts, calendar_name="シフトカレンダー",
     full_script, event_count = build_apple_calendar_script(shifts, calendar_name, include_events=include_events)
 
     # 一時スクリプトファイルを経由して安全に実行
-    import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", encoding="utf-8", delete=False) as tf:
         tf.write(full_script)
         temp_path = tf.name

@@ -12,6 +12,20 @@ _STORAGE_LOCK = threading.RLock()
 
 _CONFIG_RUNTIME_KEYS = ("local_ip", "mobile_url", "backend_version", "server_version")
 
+ALLOWED_CONFIG_KEYS = frozenset({
+    "api_key",
+    "default_name",
+    "calendar_name",
+    "time_definitions",
+    "register_holidays",
+    "register_paid_leaves",
+    "theme",
+    "paid_leave_start_month",
+    "paid_leave_start_day",
+    "paid_leave_annual_days",
+    "paid_leave_hours_per_day",
+})
+
 # デフォルトの凡例マスター（写真に凡例が写っていなくても次回以降も適用）
 DEFAULT_TIME_DEFINITIONS = {
     "早A": {"start": "06:00", "end": "15:00"},

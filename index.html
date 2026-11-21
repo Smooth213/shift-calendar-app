@@ -2895,6 +2895,27 @@
       btnDeleteHistory.disabled = !hasVal;
     });
 
+    function applyHistoryImageToViewer(hist) {
+      if (hist.image_base64) {
+        AppState.analysis.mimeType = hist.mime_type || "image/jpeg";
+        const imgSrc = hist.image_base64.startsWith("data:")
+          ? hist.image_base64
+          : `data:${AppState.analysis.mimeType};base64,${hist.image_base64}`;
+        AppState.analysis.imageBase64 = imgSrc;
+        const compareImg = document.getElementById("compare-image");
+        if (compareImg) compareImg.src = imgSrc;
+        const previewThumb = document.getElementById("preview-thumbnail");
+        if (previewThumb) {
+          previewThumb.src = imgSrc;
+          previewThumb.style.display = "block";
+        }
+        const btnToggle = document.getElementById("btn-toggle-viewer");
+        if (btnToggle) btnToggle.style.display = "inline-flex";
+      }
+      AppState.analysis.dewarpStatus = hist.dewarp_status || null;
+      updateDewarpStatusBadge(AppState.analysis.dewarpStatus);
+    }
+
     async function loadHistoryById(id, options = {}) {
       if (!id) return false;
       const { focusDate = null, switchToImport = false } = options;
@@ -2907,8 +2928,8 @@
         if (!json.success || !json.data) throw new Error("データの取得に失敗しました");
 
         const hist = json.data;
-        currentHistoryId = hist.id;
-        currentHistoryMeta = {
+        AppState.history.currentId = hist.id;
+        AppState.history.currentMeta = {
           id: hist.id,
           title: hist.title || "シフト",
           registered: Boolean(hist.registered),
@@ -2919,24 +2940,7 @@
         if (btnDeleteHistory) btnDeleteHistory.disabled = false;
 
         // 元画像をビューワーにセット
-        if (hist.image_base64) {
-          currentMimeType = hist.mime_type || "image/jpeg";
-          const imgSrc = hist.image_base64.startsWith("data:")
-            ? hist.image_base64
-            : `data:${currentMimeType};base64,${hist.image_base64}`;
-          currentImageBase64 = imgSrc;
-          const compareImg = document.getElementById("compare-image");
-          if (compareImg) compareImg.src = imgSrc;
-          const previewThumb = document.getElementById("preview-thumbnail");
-          if (previewThumb) {
-            previewThumb.src = imgSrc;
-            previewThumb.style.display = "block";
-          }
-          const btnToggle = document.getElementById("btn-toggle-viewer");
-          if (btnToggle) btnToggle.style.display = "inline-flex";
-        }
-        currentDewarpStatus = hist.dewarp_status || null;
-        updateDewarpStatusBadge(currentDewarpStatus);
+        applyHistoryImageToViewer(hist);
 
         if (switchToImport) {
           switchMainTab("import");
@@ -2951,15 +2955,15 @@
           btnRetryEventsEl.disabled = false;
         }
 
-        if (focusDate && Array.isArray(analyzedShifts)) {
-          const targetIdx = analyzedShifts.findIndex(s => s && s.date === focusDate);
+        if (focusDate && Array.isArray(AppState.analysis.shifts)) {
+          const targetIdx = AppState.analysis.shifts.findIndex(s => s && s.date === focusDate);
           if (targetIdx !== -1) {
             selectCalendarDate(targetIdx, { scrollTable: true, debounceImage: false });
           }
         }
 
         historyActiveInfo.style.display = "flex";
-        updateHistoryActiveBanner(currentHistoryMeta);
+        updateHistoryActiveBanner(AppState.history.currentMeta);
         showToast(`履歴「${hist.title}」を読み込みました`, "success");
         return true;
       } catch (e) {
@@ -3620,8 +3624,65 @@
       return applied;
     }
 
+    async function applyEventAnalysisResultUI(evData, applied) {
+      const hasSkipMeta = Object.prototype.hasOwnProperty.call(evData, "skipped_holidays_count");
+      const skippedHolidays = Array.isArray(evData.skipped_holidays) ? evData.skipped_holidays : [];
+      const skippedCount = Number(evData.skipped_holidays_count || skippedHolidays.length || 0);
+      const skippedNames = skippedHolidays.map(h => (h && h.name ? String(h.name) : "")).filter(Boolean);
+      const skippedSummary = skippedCount > 0 ? `（祝日等 ${skippedCount}件スキップ）` : "";
+      const skippedDetail = skippedNames.length > 0 ? `［除外: ${skippedNames.join("、")}］` : "";
+
+      renderSkippedHolidaysAccordion(skippedHolidays, true);
+      if (!hasSkipMeta && skippedHolidaysListEl) {
+        skippedHolidaysListEl.innerHTML = `<span class="skipped-holiday-date">古いバックグラウンドサーバーが稼働していたため自動停止しました。もう一度クイックアクション（または launch.command）を実行してください。</span>`;
+        setSkippedHolidaysPanelOpen(true);
+        try {
+          await ApiClient.postEmpty("/api/shutdown");
+        } catch (e) { }
+      }
+
+      if (eventsStatusBadgeEl) {
+        eventsStatusBadgeEl.title = skippedNames.length > 0
+          ? `日本の祝日・標準行事と重複するため除外: ${skippedNames.join("、")}`
+          : "";
+      }
+
+      if (applied > 0) {
+        updateProgressUI(
+          100,
+          "すべての解析が完了しました",
+          `シフト ${AppState.analysis.shifts.length}日分 ＋ 行事予定 ${applied}件を抽出しました${skippedSummary}${skippedDetail}`,
+          4,
+          "done"
+        );
+        if (eventsStatusBadgeEl) eventsStatusBadgeEl.textContent = `行事予定 ${applied}件を反映済み`;
+        showToast(`行事予定を ${applied}件読み取りました${skippedSummary}`, "success");
+      } else if (skippedCount > 0) {
+        updateProgressUI(
+          100,
+          "すべての解析が完了しました",
+          `日本の祝日・標準行事 ${skippedCount}件をスキップしました（職場行事 0件）${skippedDetail}`,
+          4,
+          "done"
+        );
+        if (eventsStatusBadgeEl) eventsStatusBadgeEl.textContent = `行事予定: 0件`;
+        showToast(`日本の祝日・標準行事 ${skippedCount}件をスキップしました`, "success");
+      } else {
+        const candCount = Array.isArray(evData.active_cols) ? evData.active_cols.length : 0;
+        const detailMsg = candCount > 0
+          ? "API混雑のため行事予定を取得できませんでした（「行事予定のみ再取得」で再試行できます）"
+          : "行事予定の記載はありませんでした";
+        updateProgressUI(100, "シフト解析完了（行事予定 0件）", detailMsg, 4, "done");
+        if (eventsStatusBadgeEl) eventsStatusBadgeEl.textContent = candCount > 0 ? "行事予定: 未取得（再取得可）" : "行事予定: なし";
+      }
+      if (btnRetryEventsEl) {
+        btnRetryEventsEl.style.display = "inline-flex";
+        btnRetryEventsEl.disabled = false;
+      }
+    }
+
     async function runEventAnalysisPhase(apiKey) {
-      if (!currentImageBase64 || !analyzedShifts.length) return 0;
+      if (!AppState.analysis.imageBase64 || !AppState.analysis.shifts.length) return 0;
       if (eventsStatusBadgeEl) {
         eventsStatusBadgeEl.style.display = "inline-flex";
         eventsStatusBadgeEl.textContent = "ステップ 4/4: 行事予定を読み取り中...";
@@ -3633,7 +3694,7 @@
 
       try {
         const { res: evRes, data: evJson } = await ApiClient.postJson("/api/analyze_events", {
-          image_base64: currentImageBase64,
+          image_base64: AppState.analysis.imageBase64,
           api_key: apiKey
         });
         if (!evRes.ok || evJson.error) {
@@ -3641,60 +3702,7 @@
         }
         const evData = evJson.data || {};
         const applied = applyExtractedEventsToUI(evData.events || {});
-        const hasSkipMeta = Object.prototype.hasOwnProperty.call(evData, "skipped_holidays_count");
-        const skippedHolidays = Array.isArray(evData.skipped_holidays) ? evData.skipped_holidays : [];
-        const skippedCount = Number(evData.skipped_holidays_count || skippedHolidays.length || 0);
-        const skippedNames = skippedHolidays.map(h => (h && h.name ? String(h.name) : "")).filter(Boolean);
-        const skippedSummary = skippedCount > 0 ? `（祝日等 ${skippedCount}件スキップ）` : "";
-        const skippedDetail = skippedNames.length > 0 ? `［除外: ${skippedNames.join("、")}］` : "";
-
-        renderSkippedHolidaysAccordion(skippedHolidays, true);
-        if (!hasSkipMeta && skippedHolidaysListEl) {
-          skippedHolidaysListEl.innerHTML = `<span class="skipped-holiday-date">古いバックグラウンドサーバーが稼働していたため自動停止しました。もう一度クイックアクション（または launch.command）を実行してください。</span>`;
-          setSkippedHolidaysPanelOpen(true);
-          try {
-            await ApiClient.postEmpty("/api/shutdown");
-          } catch (e) { }
-        }
-
-        if (eventsStatusBadgeEl) {
-          eventsStatusBadgeEl.title = skippedNames.length > 0
-            ? `日本の祝日・標準行事と重複するため除外: ${skippedNames.join("、")}`
-            : "";
-        }
-
-        if (applied > 0) {
-          updateProgressUI(
-            100,
-            "すべての解析が完了しました",
-            `シフト ${analyzedShifts.length}日分 ＋ 行事予定 ${applied}件を抽出しました${skippedSummary}${skippedDetail}`,
-            4,
-            "done"
-          );
-          if (eventsStatusBadgeEl) eventsStatusBadgeEl.textContent = `行事予定 ${applied}件を反映済み`;
-          showToast(`行事予定を ${applied}件読み取りました${skippedSummary}`, "success");
-        } else if (skippedCount > 0) {
-          updateProgressUI(
-            100,
-            "すべての解析が完了しました",
-            `日本の祝日・標準行事 ${skippedCount}件をスキップしました（職場行事 0件）${skippedDetail}`,
-            4,
-            "done"
-          );
-          if (eventsStatusBadgeEl) eventsStatusBadgeEl.textContent = `行事予定: 0件`;
-          showToast(`日本の祝日・標準行事 ${skippedCount}件をスキップしました`, "success");
-        } else {
-          const candCount = Array.isArray(evData.active_cols) ? evData.active_cols.length : 0;
-          const detailMsg = candCount > 0
-            ? "API混雑のため行事予定を取得できませんでした（「行事予定のみ再取得」で再試行できます）"
-            : "行事予定の記載はありませんでした";
-          updateProgressUI(100, "シフト解析完了（行事予定 0件）", detailMsg, 4, "done");
-          if (eventsStatusBadgeEl) eventsStatusBadgeEl.textContent = candCount > 0 ? "行事予定: 未取得（再取得可）" : "行事予定: なし";
-        }
-        if (btnRetryEventsEl) {
-          btnRetryEventsEl.style.display = "inline-flex";
-          btnRetryEventsEl.disabled = false;
-        }
+        await applyEventAnalysisResultUI(evData, applied);
         return applied;
       } catch (evErr) {
         updateProgressUI(100, "シフト解析完了（行事予定エラー）", `${evErr.message}（「行事予定のみ再取得」で再試行できます）`, 4, "done");
@@ -3955,7 +3963,7 @@
       });
 
       const selectOptionsHtml = shiftOptions
-        .map(opt => `<option value="${opt.key}" ${opt.key === currentKey ? "selected" : ""}>${opt.label}</option>`)
+        .map(opt => `<option value="${escapeHtmlText(opt.key)}" ${opt.key === currentKey ? "selected" : ""}>${escapeHtmlText(opt.label)}</option>`)
         .join("");
 
       const dayColor = s.day_of_week === "土" ? "color:var(--accent);font-weight:600;" : (s.day_of_week === "日" ? "color:#ff453a;font-weight:600;" : "");
@@ -4269,7 +4277,7 @@
             <span>${dayNum}</span>
             <span style="font-size: 9px; color: var(--label-tertiary);">${dt.getMonth() + 1}月</span>
           </div>
-          <div class="cal-event-capsule ${statusClass}" data-key="${itemKey}">
+          <div class="cal-event-capsule ${statusClass}" data-key="${escapeHtmlText(itemKey)}">
             <div class="cal-capsule-title">${escapeHtmlText(titleLabel)}</div>
             <div class="cal-capsule-time">${escapeHtmlText(timeLabel)}</div>
           </div>
@@ -4891,163 +4899,167 @@
     }
 
     // Tab & Calendar Navigation Event Listeners
-    const tabBtnCalendarEl = document.getElementById("tab-btn-calendar");
-    const tabBtnImportEl = document.getElementById("tab-btn-import");
-    if (tabBtnCalendarEl) tabBtnCalendarEl.addEventListener("click", () => switchMainTab("calendar"));
-    if (tabBtnImportEl) tabBtnImportEl.addEventListener("click", () => switchMainTab("import"));
+    function bindMonthlyCalendarControls() {
+      const tabBtnCalendarEl = document.getElementById("tab-btn-calendar");
+      const tabBtnImportEl = document.getElementById("tab-btn-import");
+      if (tabBtnCalendarEl) tabBtnCalendarEl.addEventListener("click", () => switchMainTab("calendar"));
+      if (tabBtnImportEl) tabBtnImportEl.addEventListener("click", () => switchMainTab("import"));
 
-    const btnCalPrevMonthEl = document.getElementById("btn-cal-prev-month");
-    const btnCalNextMonthEl = document.getElementById("btn-cal-next-month");
-    const btnCalTodayEl = document.getElementById("btn-cal-today");
-    const btnCalMonthPickerEl = document.getElementById("btn-cal-month-picker");
-    const btnPickerPrevYearEl = document.getElementById("btn-picker-prev-year");
-    const btnPickerNextYearEl = document.getElementById("btn-picker-next-year");
-    const btnCalGoImportEl = document.getElementById("btn-cal-go-import");
-    const btnCalOpenLeaveSettingsEl = document.getElementById("btn-cal-open-leave-settings");
-    const btnCalOpenHistoryEl = document.getElementById("btn-cal-open-history");
-    const btnCalCloseDetailEl = document.getElementById("btn-cal-close-detail");
-    const btnCalSaveHourlyLeaveEl = document.getElementById("btn-cal-save-hourly-leave");
+      const btnCalPrevMonthEl = document.getElementById("btn-cal-prev-month");
+      const btnCalNextMonthEl = document.getElementById("btn-cal-next-month");
+      const btnCalTodayEl = document.getElementById("btn-cal-today");
+      const btnCalMonthPickerEl = document.getElementById("btn-cal-month-picker");
+      const btnPickerPrevYearEl = document.getElementById("btn-picker-prev-year");
+      const btnPickerNextYearEl = document.getElementById("btn-picker-next-year");
+      const btnCalGoImportEl = document.getElementById("btn-cal-go-import");
+      const btnCalOpenLeaveSettingsEl = document.getElementById("btn-cal-open-leave-settings");
+      const btnCalOpenHistoryEl = document.getElementById("btn-cal-open-history");
+      const btnCalCloseDetailEl = document.getElementById("btn-cal-close-detail");
+      const btnCalSaveHourlyLeaveEl = document.getElementById("btn-cal-save-hourly-leave");
 
-    if (btnCalPrevMonthEl) btnCalPrevMonthEl.addEventListener("click", () => shiftCalendarMonth(-1));
-    if (btnCalNextMonthEl) btnCalNextMonthEl.addEventListener("click", () => shiftCalendarMonth(1));
-    if (btnCalTodayEl) {
-      btnCalTodayEl.addEventListener("click", () => {
-        const now = new Date();
-        calendarViewYear = now.getFullYear();
-        calendarViewMonth = now.getMonth() + 1;
-        calendarSelectedDate = null;
-        setMonthPickerOpen(false);
-        renderMonthlyCalendarView();
-      });
-    }
-    if (btnCalMonthPickerEl) {
-      btnCalMonthPickerEl.addEventListener("click", (e) => {
-        if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-        const popover = document.getElementById("cal-month-picker-popover");
-        const isOpen = popover && popover.classList.contains("is-open");
-        setMonthPickerOpen(!isOpen);
-      });
-    }
-    if (btnPickerPrevYearEl) {
-      btnPickerPrevYearEl.addEventListener("click", (e) => {
-        if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-        calendarPickerYear -= 1;
-        renderMonthPickerGrid();
-      });
-    }
-    if (btnPickerNextYearEl) {
-      btnPickerNextYearEl.addEventListener("click", (e) => {
-        if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-        calendarPickerYear += 1;
-        renderMonthPickerGrid();
-      });
-    }
-    if (btnCalGoImportEl) btnCalGoImportEl.addEventListener("click", () => switchMainTab("import"));
-    if (btnCalOpenLeaveSettingsEl) btnCalOpenLeaveSettingsEl.addEventListener("click", openSettingsModal);
-    if (btnCalCloseDetailEl) {
-      btnCalCloseDetailEl.addEventListener("click", () => {
-        calendarSelectedDate = null;
-        renderMonthlyCalendarView();
-      });
-    }
-    if (btnCalOpenHistoryEl) {
-      btnCalOpenHistoryEl.addEventListener("click", async () => {
-        const histId = btnCalOpenHistoryEl.dataset ? btnCalOpenHistoryEl.dataset.historyId : "";
-        const targetDate = btnCalOpenHistoryEl.dataset ? btnCalOpenHistoryEl.dataset.date : null;
-        if (!histId) return;
-        await loadHistoryById(histId, { focusDate: targetDate, switchToImport: true });
-      });
-    }
-    if (btnCalSaveHourlyLeaveEl) {
-      btnCalSaveHourlyLeaveEl.addEventListener("click", async () => {
-        const histId = btnCalSaveHourlyLeaveEl.dataset ? btnCalSaveHourlyLeaveEl.dataset.historyId : "";
-        const targetDate = btnCalSaveHourlyLeaveEl.dataset ? btnCalSaveHourlyLeaveEl.dataset.date : "";
-        if (!histId || !targetDate) return;
-        const selEl = document.getElementById("cal-detail-hourly-select");
-        const syncEl = document.getElementById("cal-detail-hourly-sync-apple");
-        const hours = clampHalfHour(selEl ? selEl.value : 0, 0, 0, paidLeaveConfig.hoursPerDay - 0.5);
-        const syncApple = syncEl ? Boolean(syncEl.checked) : true;
-        const calNameEl = document.getElementById("calendar-name");
-        const calName = (calNameEl && calNameEl.value ? calNameEl.value.trim() : "") || "シフトカレンダー";
+      if (btnCalPrevMonthEl) btnCalPrevMonthEl.addEventListener("click", () => shiftCalendarMonth(-1));
+      if (btnCalNextMonthEl) btnCalNextMonthEl.addEventListener("click", () => shiftCalendarMonth(1));
+      if (btnCalTodayEl) {
+        btnCalTodayEl.addEventListener("click", () => {
+          const now = new Date();
+          AppState.calendar.viewYear = now.getFullYear();
+          AppState.calendar.viewMonth = now.getMonth() + 1;
+          AppState.calendar.selectedDate = null;
+          setMonthPickerOpen(false);
+          renderMonthlyCalendarView();
+        });
+      }
+      if (btnCalMonthPickerEl) {
+        btnCalMonthPickerEl.addEventListener("click", (e) => {
+          if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+          const popover = document.getElementById("cal-month-picker-popover");
+          const isOpen = popover && popover.classList.contains("is-open");
+          setMonthPickerOpen(!isOpen);
+        });
+      }
+      if (btnPickerPrevYearEl) {
+        btnPickerPrevYearEl.addEventListener("click", (e) => {
+          if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+          calendarPickerYear -= 1;
+          renderMonthPickerGrid();
+        });
+      }
+      if (btnPickerNextYearEl) {
+        btnPickerNextYearEl.addEventListener("click", (e) => {
+          if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+          calendarPickerYear += 1;
+          renderMonthPickerGrid();
+        });
+      }
+      if (btnCalGoImportEl) btnCalGoImportEl.addEventListener("click", () => switchMainTab("import"));
+      if (btnCalOpenLeaveSettingsEl) btnCalOpenLeaveSettingsEl.addEventListener("click", openSettingsModal);
+      if (btnCalCloseDetailEl) {
+        btnCalCloseDetailEl.addEventListener("click", () => {
+          AppState.calendar.selectedDate = null;
+          renderMonthlyCalendarView();
+        });
+      }
+      if (btnCalOpenHistoryEl) {
+        btnCalOpenHistoryEl.addEventListener("click", async () => {
+          const histId = btnCalOpenHistoryEl.dataset ? btnCalOpenHistoryEl.dataset.historyId : "";
+          const targetDate = btnCalOpenHistoryEl.dataset ? btnCalOpenHistoryEl.dataset.date : null;
+          if (!histId) return;
+          await loadHistoryById(histId, { focusDate: targetDate, switchToImport: true });
+        });
+      }
+      if (btnCalSaveHourlyLeaveEl) {
+        btnCalSaveHourlyLeaveEl.addEventListener("click", async () => {
+          const histId = btnCalSaveHourlyLeaveEl.dataset ? btnCalSaveHourlyLeaveEl.dataset.historyId : "";
+          const targetDate = btnCalSaveHourlyLeaveEl.dataset ? btnCalSaveHourlyLeaveEl.dataset.date : "";
+          if (!histId || !targetDate) return;
+          const selEl = document.getElementById("cal-detail-hourly-select");
+          const syncEl = document.getElementById("cal-detail-hourly-sync-apple");
+          const hours = clampHalfHour(selEl ? selEl.value : 0, 0, 0, AppState.calendar.paidLeaveConfig.hoursPerDay - 0.5);
+          const syncApple = syncEl ? Boolean(syncEl.checked) : true;
+          const calNameEl = document.getElementById("calendar-name");
+          const calName = (calNameEl && calNameEl.value ? calNameEl.value.trim() : "") || "シフトカレンダー";
 
-        btnCalSaveHourlyLeaveEl.disabled = true;
-        btnCalSaveHourlyLeaveEl.textContent = "保存中...";
-        try {
-          const { res, data: json } = await ApiClient.postJson("/api/calendar_shifts/hourly_leave", {
-            history_id: histId,
-            date: targetDate,
-            hourly_paid_leave: hours,
-            sync_apple_calendar: syncApple,
-            calendar_name: calName,
-            include_events: isIncludeEventsEnabled()
-          });
-          if (!res.ok || !json.success) {
-            throw new Error(json.error || "時間有給の保存に失敗しました");
+          btnCalSaveHourlyLeaveEl.disabled = true;
+          btnCalSaveHourlyLeaveEl.textContent = "保存中...";
+          try {
+            const { res, data: json } = await ApiClient.postJson("/api/calendar_shifts/hourly_leave", {
+              history_id: histId,
+              date: targetDate,
+              hourly_paid_leave: hours,
+              sync_apple_calendar: syncApple,
+              calendar_name: calName,
+              include_events: isIncludeEventsEnabled()
+            });
+            if (!res.ok || !json.success) {
+              throw new Error(json.error || "時間有給の保存に失敗しました");
+            }
+            await fetchRegisteredCalendarShifts();
+            const msg = json.apple_calendar_synced
+              ? "時間有給を保存し、Appleカレンダーへ反映しました"
+              : "時間有給を保存しました";
+            showToast(msg, "success");
+          } catch (e) {
+            showToast(`保存エラー: ${e.message}`, "error");
+          } finally {
+            btnCalSaveHourlyLeaveEl.disabled = false;
+            btnCalSaveHourlyLeaveEl.textContent = "時間有給を保存";
           }
-          await fetchRegisteredCalendarShifts();
-          const msg = json.apple_calendar_synced
-            ? "時間有給を保存し、Appleカレンダーへ反映しました"
-            : "時間有給を保存しました";
-          showToast(msg, "success");
-        } catch (e) {
-          showToast(`保存エラー: ${e.message}`, "error");
-        } finally {
-          btnCalSaveHourlyLeaveEl.disabled = false;
-          btnCalSaveHourlyLeaveEl.textContent = "時間有給を保存";
+        });
+      }
+
+      // Close month picker on outside click / Escape, and ArrowLeft/Right navigation
+      document.addEventListener("click", (e) => {
+        const popover = document.getElementById("cal-month-picker-popover");
+        const trigger = document.getElementById("btn-cal-month-picker");
+        if (!popover || !popover.classList.contains("is-open")) return;
+        const target = e ? e.target : null;
+        const inPopover = popover.contains && target && popover.contains(target);
+        const inTrigger = trigger && trigger.contains && target && trigger.contains(target);
+        if (!inPopover && !inTrigger) {
+          setMonthPickerOpen(false);
         }
       });
+
+      document.addEventListener("keydown", (e) => {
+        if (!e) return;
+        if (e.key === "Escape") {
+          setMonthPickerOpen(false);
+          return;
+        }
+        if (AppState.calendar.activeTab !== "calendar") return;
+        if (settingsModal && settingsModal.style.display === "flex") return;
+        if (qrModal && qrModal.style.display === "flex") return;
+        const activeTag = document.activeElement && document.activeElement.tagName ? document.activeElement.tagName.toUpperCase() : "";
+        if (activeTag === "INPUT" || activeTag === "SELECT" || activeTag === "TEXTAREA") return;
+        if (e.key === "ArrowLeft") shiftCalendarMonth(-1);
+        else if (e.key === "ArrowRight") shiftCalendarMonth(1);
+      });
+
+      // Touch swipe for mobile month navigation
+      const monthlyCalendarFrameEl = document.getElementById("monthly-calendar-frame");
+      if (monthlyCalendarFrameEl) {
+        let touchStartX = null;
+        let touchStartY = null;
+        monthlyCalendarFrameEl.addEventListener("touchstart", (e) => {
+          if (e && e.touches && e.touches.length === 1) {
+            touchStartX = e.touches[0].clientX;
+            touchStartY = e.touches[0].clientY;
+          }
+        }, { passive: true });
+        monthlyCalendarFrameEl.addEventListener("touchend", (e) => {
+          if (touchStartX === null || !e || !e.changedTouches || !e.changedTouches.length) return;
+          const dx = e.changedTouches[0].clientX - touchStartX;
+          const dy = e.changedTouches[0].clientY - touchStartY;
+          touchStartX = null;
+          touchStartY = null;
+          if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+            shiftCalendarMonth(dx < 0 ? 1 : -1);
+          }
+        }, { passive: true });
+      }
     }
 
-    // Close month picker on outside click / Escape, and ArrowLeft/Right navigation
-    document.addEventListener("click", (e) => {
-      const popover = document.getElementById("cal-month-picker-popover");
-      const trigger = document.getElementById("btn-cal-month-picker");
-      if (!popover || !popover.classList.contains("is-open")) return;
-      const target = e ? e.target : null;
-      const inPopover = popover.contains && target && popover.contains(target);
-      const inTrigger = trigger && trigger.contains && target && trigger.contains(target);
-      if (!inPopover && !inTrigger) {
-        setMonthPickerOpen(false);
-      }
-    });
-
-    document.addEventListener("keydown", (e) => {
-      if (!e) return;
-      if (e.key === "Escape") {
-        setMonthPickerOpen(false);
-        return;
-      }
-      if (activeMainTab !== "calendar") return;
-      if (settingsModal && settingsModal.style.display === "flex") return;
-      if (qrModal && qrModal.style.display === "flex") return;
-      const activeTag = document.activeElement && document.activeElement.tagName ? document.activeElement.tagName.toUpperCase() : "";
-      if (activeTag === "INPUT" || activeTag === "SELECT" || activeTag === "TEXTAREA") return;
-      if (e.key === "ArrowLeft") shiftCalendarMonth(-1);
-      else if (e.key === "ArrowRight") shiftCalendarMonth(1);
-    });
-
-    // Touch swipe for mobile month navigation
-    const monthlyCalendarFrameEl = document.getElementById("monthly-calendar-frame");
-    if (monthlyCalendarFrameEl) {
-      let touchStartX = null;
-      let touchStartY = null;
-      monthlyCalendarFrameEl.addEventListener("touchstart", (e) => {
-        if (e && e.touches && e.touches.length === 1) {
-          touchStartX = e.touches[0].clientX;
-          touchStartY = e.touches[0].clientY;
-        }
-      }, { passive: true });
-      monthlyCalendarFrameEl.addEventListener("touchend", (e) => {
-        if (touchStartX === null || !e || !e.changedTouches || !e.changedTouches.length) return;
-        const dx = e.changedTouches[0].clientX - touchStartX;
-        const dy = e.changedTouches[0].clientY - touchStartY;
-        touchStartX = null;
-        touchStartY = null;
-        if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
-          shiftCalendarMonth(dx < 0 ? 1 : -1);
-        }
-      }, { passive: true });
-    }
+    bindMonthlyCalendarControls();
 
     // Initial tab & empty calendar render before fetch completes
     switchMainTab("calendar");
