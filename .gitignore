@@ -1,0 +1,10 @@
+# Secrets & user data
+config.json
+history/
+history_images/
+backups/
+
+# Python / OS artifacts
+__pycache__/
+*.py[cod]
+.DS_Store
