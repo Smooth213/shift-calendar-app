@@ -4,7 +4,8 @@ import socket
 import tempfile
 import threading
 
-from shift_calendar.calendar_export import _clamp_half_hour
+from shift_calendar.domain import clamp_half_hour as _clamp_half_hour
+from shift_calendar.domain import clamp_int as _clamp_int
 
 # 並行リクエスト保護用ロック（再入可能な RLock を使用）
 _STORAGE_LOCK = threading.RLock()
@@ -31,14 +32,6 @@ def get_local_ip():
             return s.getsockname()[0]
     except Exception:
         return "127.0.0.1"
-
-
-def _clamp_int(val, default, min_val, max_val):
-    try:
-        num = int(val)
-    except (TypeError, ValueError):
-        return default
-    return max(min_val, min(max_val, num))
 
 
 def _atomic_write_json(path, data):

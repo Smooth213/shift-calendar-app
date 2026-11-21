@@ -82,6 +82,35 @@ class TestPhase3BFrontendArchitecture(unittest.TestCase):
         self.assertEqual(post_call["opts"]["method"], "POST")
         self.assertEqual(json.loads(post_call["opts"]["body"]), {"theme": "dark"})
 
+    def test_04_no_direct_fetch_outside_api_client(self):
+        """index.html 内の全API通信が ApiClient 経由に統一されており、外部に直接 fetch() が残っていないこと"""
+        import re
+        from tests.dom_harness import extract_index_script
+
+        script = extract_index_script()
+        api_client_block = re.search(r"const ApiClient\s*=\s*\{[\s\S]*?\n    \};", script)
+        self.assertIsNotNone(api_client_block, "ApiClient 定義が見つかりません")
+        outside = script[:api_client_block.start()] + script[api_client_block.end():]
+        direct_fetches = re.findall(r"\bfetch\s*\(", outside)
+        self.assertEqual(direct_fetches, [], msg=f"ApiClient 外に直接 fetch() が残っています: {len(direct_fetches)}件")
+
+    def test_05_legend_renderer_escapes_html_special_chars(self):
+        """renderMasterDefs が特殊文字を含む区分名をエスケープして描画すること"""
+        test_js = r"""
+        const ctx = createIndexContext();
+        const html = vm.runInContext(`
+          renderMasterDefs({ '<img src=x>': { start: '08:00', end: '17:00' } });
+          const cont = document.getElementById("defs-container");
+          cont.children.map(c => c.innerHTML).join("|");
+        `, ctx);
+        console.log(JSON.stringify({ html }));
+        """
+        rc, out, err = run_node_harness(test_js)
+        self.assertEqual(rc, 0, msg=f"Node harness failed: {err}")
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertIn("&lt;img src=x&gt;", payload["html"])
+        self.assertNotIn("<img src=x>", payload["html"])
+
 
 if __name__ == "__main__":
     unittest.main()

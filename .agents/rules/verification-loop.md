@@ -61,11 +61,11 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 - フレームワーク：Python標準 `http.server` + `unittest`、Vanilla HTML/CSS/JS
 - パッケージ管理：該当ファイル（`requirements.txt` / `pyproject.toml` / `package.json`）なし
 - ビルドツール：なし（インタプリタ実行・単一HTML）
-- テスト環境：`tests/` 配下10ファイル（`test_dewarping.py`, `test_grid_detection.py`, `test_events.py`, `test_history_retention.py`, `test_history_storage.py`, `test_security_and_concurrency.py`, `test_calendar_tab.py`, `test_brushup_features.py`, `test_progress_and_two_stage_ui.py`, `test_ui_sync.py`、`unittest`）
+- テスト環境：`tests/` 配下12テストファイル＋`dom_harness.py`（`test_dewarping.py`, `test_grid_detection.py`, `test_events.py`, `test_gemini_client.py`, `test_history_retention.py`, `test_history_storage.py`, `test_security_and_concurrency.py`, `test_calendar_tab.py`, `test_brushup_features.py`, `test_progress_and_two_stage_ui.py`, `test_ui_sync.py`, `test_frontend_architecture.py`、`unittest`）
 - CI環境：なし
 - Git管理：ローカル Git 管理あり（`.gitignore` 適用済み）
 - Sandboxの制約：
-  - サンドボックス内ではワークスペース外（別会話ディレクトリ内の実写真フィクスチャ等）へアクセスできないため、一部実写真テストが自動スキップされる（全65件中4件スキップ、61件実行を確認済み）。
+  - サンドボックス内ではワークスペース外（別会話ディレクトリ内の実写真フィクスチャ等）へアクセスできないため、一部実写真テストが自動スキップされる（全79件中4件スキップ、75件実行を確認済み）。
   - ネットワークアクセスおよびポートバインド（ローカルサーバー起動確認等）はサンドボックス制限を受ける場合がある。
 
 ### 2.2 検証コマンド（実在を確認済み）
@@ -101,7 +101,7 @@ description: "プロジェクト固有の検証方法、合格基準、Inner / O
 ## 3. ベースライン確認
 
 - 変更前に、対象ファイル（`index.html` / `app.py` 等）の現状、`python3 -m unittest discover -s tests -v` の結果、および環境制約（スキップ件数含む）を確認・記録する。
-- `.git` が存在しないため、変更箇所と変更理由を明確に追跡し、既存機能・既存変更を破棄・上書きしない。
+- `git status` / `git diff` を用いて変更箇所と変更理由を明確に追跡し、既存機能・既存変更を破棄・上書きしない。
 
 ---
 

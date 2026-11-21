@@ -6,6 +6,213 @@ import cv2
 import numpy as np
 
 
+def _detect_table_outer_hull(img):
+    """基準解像度(長辺1024px)で壁紙ノイズを除去し、勤務表外枠の凸包・スケール・面積比を返す。"""
+    orig_h, orig_w = img.shape[:2]
+    scale = 1024.0 / max(orig_h, orig_w)
+    work_w = int(round(orig_w * scale))
+    work_h = int(round(orig_h * scale))
+    work_img = cv2.resize(img, (work_w, work_h), interpolation=cv2.INTER_AREA)
+
+    gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    # C=17により壁紙のザラザラ模様や薄い影を完全消去し、紙上の黒い罫線のみを抽出
+    binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 17)
+
+    # 孤立ノイズを除去し、罫線ネットワーク（幅/高さ>40px または 面積>200px）のみ残す
+    num_l, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+    clean = np.zeros_like(binary)
+    for i in range(1, num_l):
+        if stats[i, cv2.CC_STAT_WIDTH] > 40 or stats[i, cv2.CC_STAT_HEIGHT] > 40 or stats[i, cv2.CC_STAT_AREA] > 200:
+            clean[labels == i] = 255
+
+    closed = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None, scale, 0.0
+
+    # 面積と矩形度(solidity)の積が最大の凸包（勤務表の外枠）を選択
+    best_hull = None
+    best_score = -1.0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < (work_w * work_h) * 0.04:
+            continue
+        hull = cv2.convexHull(c)
+        hull_area = cv2.contourArea(hull)
+        rect = cv2.minAreaRect(hull)
+        rw, rh = rect[1]
+        if rw < 50 or rh < 50:
+            continue
+        sol = hull_area / max(rw * rh, 1.0)
+        if sol < 0.65:
+            continue
+        score = hull_area * (sol ** 2)
+        if score > best_score:
+            best_score = score
+            best_hull = hull
+
+    if best_hull is None:
+        return None, scale, 0.0
+
+    area_ratio = cv2.contourArea(best_hull) / float(work_w * work_h)
+    return best_hull, scale, area_ratio
+
+
+def _warp_table_perspective(img, best_hull, scale):
+    """Stage 1: 凸包から4隅を特定し、3D射影変換（ホモグラフィ）で正面投影へ起こす。"""
+    peri = cv2.arcLength(best_hull, True)
+    approx = None
+    for eps_ratio in np.linspace(0.01, 0.12, 40):
+        cand = cv2.approxPolyDP(best_hull, eps_ratio * peri, True)
+        if len(cand) == 4:
+            approx = cand.reshape(4, 2).astype(np.float32)
+            break
+    if approx is None:
+        approx = cv2.boxPoints(cv2.minAreaRect(best_hull)).astype(np.float32)
+
+    # X座標で左2点・右2点、それぞれY座標で上下に分けて TL, TR, BR, BL を確定（±45°対応）
+    x_sorted = approx[np.argsort(approx[:, 0])]
+    tl, bl = x_sorted[:2][np.argsort(x_sorted[:2, 1])]
+    tr, br = x_sorted[2:][np.argsort(x_sorted[2:, 1])]
+
+    src_pts = np.array([tl, tr, br, bl], dtype=np.float32) / scale
+
+    w_est = 0.5 * (np.linalg.norm(src_pts[1] - src_pts[0]) + np.linalg.norm(src_pts[2] - src_pts[3]))
+    h_est = 0.5 * (np.linalg.norm(src_pts[3] - src_pts[0]) + np.linalg.norm(src_pts[2] - src_pts[1]))
+    out_w = 1400
+    aspect = h_est / max(w_est, 1.0)
+    # 上部の「R8年○月・時間凡例」領域を含めるため、表の縦横比に応じた上部マージンを設定
+    top_margin_ratio = 0.24 if aspect < 0.55 else 0.10
+    table_h = int(round(out_w * aspect))
+    top_pad = int(round(table_h * top_margin_ratio))
+    bot_pad = 45  # 最下部バンドの連鎖追跡で画面外クリップが起きないための下部余裕
+    out_h = max(400, min(1650, table_h + top_pad + bot_pad))
+    side_pad = 10
+
+    dst_pts = np.array([
+        [side_pad, top_pad],
+        [out_w - 1 - side_pad, top_pad],
+        [out_w - 1 - side_pad, out_h - 1 - bot_pad],
+        [side_pad, out_h - 1 - bot_pad]
+    ], dtype=np.float32)
+
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    warped = cv2.warpPerspective(img, M, (out_w, out_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return warped, top_pad, table_h
+
+
+def _track_chained_shifts(profs, start_idx, end_idx, seg_a, seg_b, limit_len, step_lim, ref_weight, prev_weight):
+    """基準スライスから左右／上下へ連鎖スライス追跡を行い、各スライスの最適シフト量配列を返す。"""
+    n = len(profs)
+    shifts = [0] * n
+    ref_mid = profs[start_idx][seg_a:seg_b]
+
+    for direction in (1, -1):
+        rng = range(start_idx + 1, end_idx) if direction == 1 else range(start_idx - 1, -1, -1)
+        for idx in rng:
+            prev_d = shifts[idx - direction]
+            prev_seg = profs[idx - direction][max(0, seg_a + prev_d):min(limit_len, seg_b + prev_d)]
+            best_d, best_sc = prev_d, -1e18
+            for d in range(prev_d - step_lim, prev_d + step_lim + 1):
+                if seg_a + d < 0 or seg_b + d > limit_len:
+                    continue
+                cand = profs[idx][seg_a + d:seg_b + d]
+                sc = ref_weight * np.dot(ref_mid, cand)
+                if len(prev_seg) == len(cand):
+                    sc += prev_weight * np.dot(prev_seg, cand)
+                if sc > best_sc:
+                    best_sc, best_d = sc, d
+            shifts[idx] = best_d
+    return shifts
+
+
+def _straighten_horizontal_lines(warped, top_pad, table_h):
+    """Stage 2: Chained Slice Tracking による全6バンド横罫線の完全水平化。"""
+    oh, ow = warped.shape[:2]
+    w_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+    sy = np.abs(cv2.Sobel(w_gray, cv2.CV_32F, 0, 1, ksize=3))
+    sx = np.abs(cv2.Sobel(w_gray, cv2.CV_32F, 1, 0, ksize=3))
+    horiz_only = np.maximum(0.0, sy - 0.7 * sx)
+    horiz_energy = cv2.GaussianBlur(horiz_only, (15, 5), 0)
+
+    n_x = 32
+    xs = np.linspace(int(ow * 0.05), ow - 12, n_x + 1, dtype=int)
+    xc_list = [0.5 * (xs[i] + xs[i + 1]) for i in range(n_x)]
+    mid_i = n_x // 2
+
+    bands_y = [
+        (max(5, top_pad - 20), top_pad + int(table_h * 0.14)),
+        (top_pad + int(table_h * 0.12), top_pad + int(table_h * 0.30)),
+        (top_pad + int(table_h * 0.26), top_pad + int(table_h * 0.48)),
+        (top_pad + int(table_h * 0.44), top_pad + int(table_h * 0.64)),
+        (top_pad + int(table_h * 0.60), top_pad + int(table_h * 0.84)),
+        (top_pad + int(table_h * 0.78), top_pad + table_h + 5)
+    ]
+    step_lim = max(4, min(9, int(table_h * 0.012)))
+    x_all = np.arange(ow, dtype=np.float32)
+
+    band_dys = []
+    band_cy = []
+    profs = [horiz_energy[:, xs[i]:xs[i + 1]].mean(axis=1) for i in range(n_x)]
+    for b_idx, (ya, yb) in enumerate(bands_y):
+        cur_lim = step_lim if b_idx < 4 else max(step_lim, int(table_h * 0.018))
+        ref_w = 0.4 if b_idx < 4 else 0.1
+        dys = _track_chained_shifts(profs, mid_i, n_x, ya, yb, oh, cur_lim, ref_w, 1.0)
+        poly = np.poly1d(np.polyfit(xc_list, dys, 4))
+        band_dys.append(poly(x_all).astype(np.float32))
+        band_cy.append(0.5 * (ya + yb))
+
+    mx, my = np.meshgrid(np.arange(ow, dtype=np.float32), np.arange(oh, dtype=np.float32))
+    anchors_y = np.array([0.0] + band_cy + [float(oh - 1)], dtype=np.float32)
+    for x in range(ow):
+        dy_vals = np.array([band_dys[0][x]] + [bd[x] for bd in band_dys] + [band_dys[-1][x]], dtype=np.float32)
+        my[:, x] += np.interp(my[:, x], anchors_y, dy_vals).astype(np.float32)
+
+    return cv2.remap(warped, mx, my, interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+def _straighten_vertical_lines(stage2_img, top_pad, table_h):
+    """Stage 3: Chained Slice Tracking による4ゾーン全縦罫線の完全垂直化。"""
+    oh, ow = stage2_img.shape[:2]
+    s2_gray = cv2.cvtColor(stage2_img, cv2.COLOR_BGR2GRAY)
+    sy2 = np.abs(cv2.Sobel(s2_gray, cv2.CV_32F, 0, 1, ksize=3))
+    sx2 = np.abs(cv2.Sobel(s2_gray, cv2.CV_32F, 1, 0, ksize=3))
+    vert_only = np.maximum(0.0, sx2 - 0.7 * sy2)
+    vert_energy = cv2.GaussianBlur(vert_only, (5, 15), 0)
+
+    n_y = 16
+    ys = np.linspace(top_pad, top_pad + table_h, n_y + 1, dtype=int)
+    yc_list = [0.5 * (ys[j] + ys[j + 1]) for j in range(n_y)]
+    mid_j = 5
+
+    x_zones = [
+        (int(ow * 0.04), int(ow * 0.28)),
+        (int(ow * 0.26), int(ow * 0.52)),
+        (int(ow * 0.50), int(ow * 0.76)),
+        (int(ow * 0.74), int(ow * 0.98))
+    ]
+    zone_cx = [0.5 * (xa + xb) for (xa, xb) in x_zones]
+    y_all = np.arange(oh, dtype=np.float32)
+    zone_dxs = []
+    step_lim_x = 5
+    profs_x = [vert_energy[ys[j]:ys[j + 1], :].mean(axis=0) for j in range(n_y)]
+
+    for (xa, xb) in x_zones:
+        dxs = _track_chained_shifts(profs_x, mid_j, n_y, xa, xb, ow, step_lim_x, 1.2, 0.6)
+        poly_x = np.poly1d(np.polyfit(yc_list, dxs, 2))
+        zone_dxs.append(poly_x(y_all).astype(np.float32))
+
+    mx3, my3 = np.meshgrid(np.arange(ow, dtype=np.float32), np.arange(oh, dtype=np.float32))
+    anchors_x = np.array([0.0] + zone_cx + [float(ow - 1)], dtype=np.float32)
+    for y in range(oh):
+        dx_vals = np.array([zone_dxs[0][y]] + [zd[y] for zd in zone_dxs] + [zone_dxs[-1][y]], dtype=np.float32)
+        mx3[y, :] += np.interp(mx3[y, :], anchors_x, dx_vals).astype(np.float32)
+
+    remapped_full = cv2.remap(stage2_img, mx3, my3, interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return remapped_full[:top_pad + table_h + 8, :]
+
+
 def dewarp_table_image_with_status(image_bytes, api_key=None):
     """
     【Phase 1: 汎用2段階補正（壁紙ノイズ耐性・斜め撮影ホモグラフィ ＋ 内部たわみ補正）】
@@ -14,9 +221,11 @@ def dewarp_table_image_with_status(image_bytes, api_key=None):
     Stage 2: 正面投影後に残る紙のアーチ状たわみを内部横罫線の相互相関で計測し、
              全横罫線・全縦罫線を水平・垂直の直線グリッドに整列させます。
     ※縦長表・横長表のアスペクト比を自動維持し、すでに補正済みの画像の二重補正を自動防止します。
+    ※引数 api_key は既存呼び出し・テスト互換のため保持（内部では未使用）。
     戻り値: (processed_bytes, corrected_b64_or_none, status)
       status: "applied" | "already_dewarped" | "not_applied"
     """
+    del api_key
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -24,245 +233,19 @@ def dewarp_table_image_with_status(image_bytes, api_key=None):
             return image_bytes, None, "not_applied"
 
         orig_h, orig_w = img.shape[:2]
-
-        # 輪郭抽出のスケール不変性を保証するため、長辺1024pxの基準作業画像で外枠を解析
-        scale = 1024.0 / max(orig_h, orig_w)
-        work_w = int(round(orig_w * scale))
-        work_h = int(round(orig_h * scale))
-        work_img = cv2.resize(img, (work_w, work_h), interpolation=cv2.INTER_AREA)
-
-        gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        # C=17により壁紙のザラザラ模様や薄い影を完全消去し、紙上の黒い罫線のみを抽出
-        binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 17)
-
-        # 孤立ノイズを除去し、罫線ネットワーク（幅/高さ>40px または 面積>200px）のみ残す
-        num_l, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
-        clean = np.zeros_like(binary)
-        for i in range(1, num_l):
-            if stats[i, cv2.CC_STAT_WIDTH] > 40 or stats[i, cv2.CC_STAT_HEIGHT] > 40 or stats[i, cv2.CC_STAT_AREA] > 200:
-                clean[labels == i] = 255
-
-        closed = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if not contours:
-            return image_bytes, None, "not_applied"
-
-        # 面積と矩形度(solidity)の積が最大の凸包（勤務表の外枠）を選択
-        best_hull = None
-        best_score = -1.0
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < (work_w * work_h) * 0.04:
-                continue
-            hull = cv2.convexHull(c)
-            hull_area = cv2.contourArea(hull)
-            rect = cv2.minAreaRect(hull)
-            rw, rh = rect[1]
-            if rw < 50 or rh < 50:
-                continue
-            sol = hull_area / max(rw * rh, 1.0)
-            if sol < 0.65:
-                continue
-            score = hull_area * (sol ** 2)
-            if score > best_score:
-                best_score = score
-                best_hull = hull
-
+        best_hull, scale, area_ratio = _detect_table_outer_hull(img)
         if best_hull is None:
             return image_bytes, None, "not_applied"
 
-        area_ratio = cv2.contourArea(best_hull) / float(work_w * work_h)
         # 二重補正防止ガード: すでに表領域が画像全体の70%以上を占める横長補正済み画像ならそのまま返す
         if orig_w >= orig_h and area_ratio > 0.70:
             print(f"[DEWARP] Image already dewarped (area_ratio={area_ratio:.2f}), skipping double warp.")
             b64 = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("utf-8")
             return image_bytes, b64, "already_dewarped"
 
-        # 凸包を4角形に近似して厳密な4隅を取得
-        peri = cv2.arcLength(best_hull, True)
-        approx = None
-        for eps_ratio in np.linspace(0.01, 0.12, 40):
-            cand = cv2.approxPolyDP(best_hull, eps_ratio * peri, True)
-            if len(cand) == 4:
-                approx = cand.reshape(4, 2).astype(np.float32)
-                break
-        if approx is None:
-            approx = cv2.boxPoints(cv2.minAreaRect(best_hull)).astype(np.float32)
-
-        # X座標で左2点・右2点、それぞれY座標で上下に分けて TL, TR, BR, BL を確定（±45°対応）
-        x_sorted = approx[np.argsort(approx[:, 0])]
-        tl, bl = x_sorted[:2][np.argsort(x_sorted[:2, 1])]
-        tr, br = x_sorted[2:][np.argsort(x_sorted[2:, 1])]
-
-        src_pts = np.array([tl, tr, br, bl], dtype=np.float32) / scale
-
-        w_est = 0.5 * (np.linalg.norm(src_pts[1] - src_pts[0]) + np.linalg.norm(src_pts[2] - src_pts[3]))
-        h_est = 0.5 * (np.linalg.norm(src_pts[3] - src_pts[0]) + np.linalg.norm(src_pts[2] - src_pts[1]))
-        out_w = 1400
-        aspect = h_est / max(w_est, 1.0)
-        # 上部の「R8年○月・時間凡例」領域を含めるため、表の縦横比に応じた上部マージンを設定
-        top_margin_ratio = 0.24 if aspect < 0.55 else 0.10
-        table_h = int(round(out_w * aspect))
-        top_pad = int(round(table_h * top_margin_ratio))
-        bot_pad = 45  # 最下部バンドの連鎖追跡で画面外クリップが起きないための下部余裕
-        out_h = max(400, min(1650, table_h + top_pad + bot_pad))
-        side_pad = 10
-
-        dst_pts = np.array([
-            [side_pad, top_pad],
-            [out_w - 1 - side_pad, top_pad],
-            [out_w - 1 - side_pad, out_h - 1 - bot_pad],
-            [side_pad, out_h - 1 - bot_pad]
-        ], dtype=np.float32)
-
-        # Stage 1: 厳密な3D射影変換（ホモグラフィ）で斜め撮影＆台形歪みを正面へ起こす
-        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        warped = cv2.warpPerspective(img, M, (out_w, out_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-
-        # Stage 2: Chained Slice Tracking（連鎖スライス追跡）による全6バンド横罫線の完全水平化
-        oh, ow = warped.shape[:2]
-        w_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        sy = np.abs(cv2.Sobel(w_gray, cv2.CV_32F, 0, 1, ksize=3))
-        sx = np.abs(cv2.Sobel(w_gray, cv2.CV_32F, 1, 0, ksize=3))
-        horiz_only = np.maximum(0.0, sy - 0.7 * sx)
-        horiz_energy = cv2.GaussianBlur(horiz_only, (15, 5), 0)
-
-        n_x = 32
-        xs = np.linspace(int(ow * 0.05), ow - 12, n_x + 1, dtype=int)
-        xc_list = [0.5 * (xs[i] + xs[i+1]) for i in range(n_x)]
-        mid_i = n_x // 2
-
-        bands_y = [
-            (max(5, top_pad - 20), top_pad + int(table_h * 0.14)),
-            (top_pad + int(table_h * 0.12), top_pad + int(table_h * 0.30)),
-            (top_pad + int(table_h * 0.26), top_pad + int(table_h * 0.48)),
-            (top_pad + int(table_h * 0.44), top_pad + int(table_h * 0.64)),
-            (top_pad + int(table_h * 0.60), top_pad + int(table_h * 0.84)),
-            (top_pad + int(table_h * 0.78), top_pad + table_h + 5)
-        ]
-        step_lim = max(4, min(9, int(table_h * 0.012)))
-        x_all = np.arange(ow, dtype=np.float32)
-
-        band_dys = []
-        band_cy = []
-        for b_idx, (ya, yb) in enumerate(bands_y):
-            cur_lim = step_lim if b_idx < 4 else max(step_lim, int(table_h * 0.018))
-            profs = [horiz_energy[:, xs[i]:xs[i+1]].mean(axis=1) for i in range(n_x)]
-            dys = [0] * n_x
-            ref_mid = profs[mid_i][ya:yb]
-
-            for i in range(mid_i + 1, n_x):
-                prev_d = dys[i - 1]
-                prev_seg = profs[i - 1][max(0, ya + prev_d):min(oh, yb + prev_d)]
-                best_d, best_sc = prev_d, -1e18
-                for d in range(prev_d - cur_lim, prev_d + cur_lim + 1):
-                    if ya + d < 0 or yb + d > oh:
-                        continue
-                    cand = profs[i][ya + d:yb + d]
-                    sc = (0.4 if b_idx < 4 else 0.1) * np.dot(ref_mid, cand)
-                    if len(prev_seg) == len(cand):
-                        sc += 1.0 * np.dot(prev_seg, cand)
-                    if sc > best_sc:
-                        best_sc, best_d = sc, d
-                dys[i] = best_d
-
-            for i in range(mid_i - 1, -1, -1):
-                prev_d = dys[i + 1]
-                prev_seg = profs[i + 1][max(0, ya + prev_d):min(oh, yb + prev_d)]
-                best_d, best_sc = prev_d, -1e18
-                for d in range(prev_d - cur_lim, prev_d + cur_lim + 1):
-                    if ya + d < 0 or yb + d > oh:
-                        continue
-                    cand = profs[i][ya + d:yb + d]
-                    sc = (0.4 if b_idx < 4 else 0.1) * np.dot(ref_mid, cand)
-                    if len(prev_seg) == len(cand):
-                        sc += 1.0 * np.dot(prev_seg, cand)
-                    if sc > best_sc:
-                        best_sc, best_d = sc, d
-                dys[i] = best_d
-
-            poly = np.poly1d(np.polyfit(xc_list, dys, 4))
-            band_dys.append(poly(x_all).astype(np.float32))
-            band_cy.append(0.5 * (ya + yb))
-
-        mx, my = np.meshgrid(np.arange(ow, dtype=np.float32), np.arange(oh, dtype=np.float32))
-        anchors_y = np.array([0.0] + band_cy + [float(oh - 1)], dtype=np.float32)
-        for x in range(ow):
-            dy_vals = np.array([band_dys[0][x]] + [bd[x] for bd in band_dys] + [band_dys[-1][x]], dtype=np.float32)
-            my[:, x] += np.interp(my[:, x], anchors_y, dy_vals).astype(np.float32)
-
-        stage2_img = cv2.remap(warped, mx, my, interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-
-        # Stage 3: Chained Slice Tracking（連鎖スライス追跡）による4ゾーン全縦罫線の完全垂直化
-        s2_gray = cv2.cvtColor(stage2_img, cv2.COLOR_BGR2GRAY)
-        sy2 = np.abs(cv2.Sobel(s2_gray, cv2.CV_32F, 0, 1, ksize=3))
-        sx2 = np.abs(cv2.Sobel(s2_gray, cv2.CV_32F, 1, 0, ksize=3))
-        vert_only = np.maximum(0.0, sx2 - 0.7 * sy2)
-        vert_energy = cv2.GaussianBlur(vert_only, (5, 15), 0)
-
-        n_y = 16
-        ys = np.linspace(top_pad, top_pad + table_h, n_y + 1, dtype=int)
-        yc_list = [0.5 * (ys[j] + ys[j+1]) for j in range(n_y)]
-        mid_j = 5
-
-        x_zones = [
-            (int(ow * 0.04), int(ow * 0.28)),
-            (int(ow * 0.26), int(ow * 0.52)),
-            (int(ow * 0.50), int(ow * 0.76)),
-            (int(ow * 0.74), int(ow * 0.98))
-        ]
-        zone_cx = [0.5 * (xa + xb) for (xa, xb) in x_zones]
-        y_all = np.arange(oh, dtype=np.float32)
-        zone_dxs = []
-        step_lim_x = 5
-
-        for (xa, xb) in x_zones:
-            profs_x = [vert_energy[ys[j]:ys[j+1], :].mean(axis=0) for j in range(n_y)]
-            dxs = [0] * n_y
-            ref_mid_x = profs_x[mid_j][xa:xb]
-
-            for j in range(mid_j + 1, n_y):
-                prev_d = dxs[j - 1]
-                prev_seg = profs_x[j - 1][max(0, xa + prev_d):min(ow, xb + prev_d)]
-                best_d, best_sc = prev_d, -1e18
-                for d in range(prev_d - step_lim_x, prev_d + step_lim_x + 1):
-                    if xa + d < 0 or xb + d > ow:
-                        continue
-                    cand = profs_x[j][xa + d:xb + d]
-                    sc = 1.2 * np.dot(ref_mid_x, cand)
-                    if len(prev_seg) == len(cand):
-                        sc += 0.6 * np.dot(prev_seg, cand)
-                    if sc > best_sc:
-                        best_sc, best_d = sc, d
-                dxs[j] = best_d
-
-            for j in range(mid_j - 1, -1, -1):
-                prev_d = dxs[j + 1]
-                prev_seg = profs_x[j + 1][max(0, xa + prev_d):min(ow, xb + prev_d)]
-                best_d, best_sc = prev_d, -1e18
-                for d in range(prev_d - step_lim_x, prev_d + step_lim_x + 1):
-                    if xa + d < 0 or xb + d > ow:
-                        continue
-                    cand = profs_x[j][xa + d:xb + d]
-                    sc = 1.2 * np.dot(ref_mid_x, cand)
-                    if len(prev_seg) == len(cand):
-                        sc += 0.6 * np.dot(prev_seg, cand)
-                    if sc > best_sc:
-                        best_sc, best_d = sc, d
-                dxs[j] = best_d
-
-            poly_x = np.poly1d(np.polyfit(yc_list, dxs, 2))
-            zone_dxs.append(poly_x(y_all).astype(np.float32))
-
-        mx3, my3 = np.meshgrid(np.arange(ow, dtype=np.float32), np.arange(oh, dtype=np.float32))
-        anchors_x = np.array([0.0] + zone_cx + [float(ow - 1)], dtype=np.float32)
-        for y in range(oh):
-            dx_vals = np.array([zone_dxs[0][y]] + [zd[y] for zd in zone_dxs] + [zone_dxs[-1][y]], dtype=np.float32)
-            mx3[y, :] += np.interp(mx3[y, :], anchors_x, dx_vals).astype(np.float32)
-
-        remapped_full = cv2.remap(stage2_img, mx3, my3, interpolation=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-        processed_img = remapped_full[:top_pad + table_h + 8, :]
+        warped, top_pad, table_h = _warp_table_perspective(img, best_hull, scale)
+        stage2_img = _straighten_horizontal_lines(warped, top_pad, table_h)
+        processed_img = _straighten_vertical_lines(stage2_img, top_pad, table_h)
         print(f"[DEWARP] Chained 3-Stage H+V Mesh Dewarping completed: {orig_w}x{orig_h} -> {processed_img.shape[1]}x{processed_img.shape[0]}")
 
         _, buf = cv2.imencode(".jpg", processed_img, [cv2.IMWRITE_JPEG_QUALITY, 95])

@@ -3,8 +3,12 @@ import os
 import re
 import time
 
-from shift_calendar.calendar_export import _clamp_half_hour, apply_hourly_leave_to_summary
 from shift_calendar.config import _STORAGE_LOCK, _atomic_write_json, _atomic_write_text
+from shift_calendar.domain import (
+    _clamp_half_hour,
+    apply_hourly_leave_to_summary,
+    sanitize_history_id,
+)
 
 MAX_UNREGISTERED_HISTORY = 5
 
@@ -113,7 +117,7 @@ def prune_unregistered_history(history_dir, max_keep=MAX_UNREGISTERED_HISTORY):
         for _, hist_id, fpath, img_file in unregistered_entries[keep_limit:]:
             try:
                 os.remove(fpath)
-                safe_id = "".join([c for c in str(hist_id) if c.isalnum() or c in ("_", "-")])
+                safe_id = sanitize_history_id(hist_id)
                 delete_history_image(history_dir, safe_id, img_file)
                 deleted_ids.append(hist_id)
             except Exception:
@@ -152,7 +156,7 @@ def get_history_list(history_dir):
 
 def get_history_detail(history_dir, hist_id):
     with _STORAGE_LOCK:
-        safe_id = "".join([c for c in hist_id if c.isalnum() or c in ("_", "-")])
+        safe_id = sanitize_history_id(hist_id)
         fpath = os.path.join(history_dir, f"{safe_id}.json")
         if os.path.exists(fpath):
             with open(fpath, "r", encoding="utf-8") as f:
@@ -174,7 +178,7 @@ def save_history(history_dir, data, max_keep=MAX_UNREGISTERED_HISTORY, strftime_
         payload = dict(data)
         explicit_id = payload.get("id")
         raw_id = explicit_id or fmt_time("%Y%m%d_%H%M%S")
-        safe_id = "".join([c for c in str(raw_id) if c.isalnum() or c in ("_", "-")]) or fmt_time("%Y%m%d_%H%M%S")
+        safe_id = sanitize_history_id(raw_id) or fmt_time("%Y%m%d_%H%M%S")
 
         if not explicit_id:
             candidate = safe_id
@@ -233,7 +237,7 @@ def mark_history_registered(history_dir, hist_id=None, history_data=None, max_ke
     fmt_time = strftime_fn or time.strftime
     with _STORAGE_LOCK:
         now_str = fmt_time("%Y-%m-%d %H:%M:%S")
-        safe_id = "".join([c for c in str(hist_id or "") if c.isalnum() or c in ("_", "-")])
+        safe_id = sanitize_history_id(hist_id)
 
         if safe_id:
             existing = get_history_detail(history_dir, safe_id)
@@ -264,7 +268,7 @@ def mark_history_registered(history_dir, hist_id=None, history_data=None, max_ke
 
 def delete_history(history_dir, hist_id):
     with _STORAGE_LOCK:
-        safe_id = "".join([c for c in hist_id if c.isalnum() or c in ("_", "-")])
+        safe_id = sanitize_history_id(hist_id)
         fpath = os.path.join(history_dir, f"{safe_id}.json")
         if os.path.exists(fpath):
             img_file = None
@@ -283,7 +287,7 @@ def delete_history(history_dir, hist_id):
 
 def update_history_shift_hourly_leave(history_dir, hist_id, date_str, hours, load_config_fn):
     """指定履歴の該当日の時間有給（0.5時間刻み）とカレンダー登録名を更新して保存する。"""
-    safe_id = "".join([c for c in str(hist_id or "") if c.isalnum() or c in ("_", "-")])
+    safe_id = sanitize_history_id(hist_id)
     if not safe_id:
         raise ValueError("履歴IDが指定されていません")
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(date_str or "").strip()):

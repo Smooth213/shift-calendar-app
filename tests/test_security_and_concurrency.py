@@ -230,6 +230,49 @@ class TestPhase1SecurityAndConcurrency(unittest.TestCase):
                 tmp_files = [f for f in os.listdir(tmpdir) if f.startswith(".tmp_")]
                 self.assertEqual(tmp_files, [])
 
+    def test_08_shutdown_rejects_non_loopback_client(self):
+        """/api/shutdown が非ループバック端末からの要求を403で拒否すること"""
+        h_lan = _make_mock_handler("/api/shutdown", method="POST", body_dict={}, client_ip="192.168.1.99")
+        h_lan.do_POST()
+        self.assertEqual(h_lan._status, 403)
+
+    def test_09_get_config_masks_api_key_for_non_loopback_client(self):
+        """GET /api/config が非ループバック端末に対してAPIキーをマスクし has_api_key を返すこと"""
+        fake_cfg = {"api_key": "REAL_SECRET_KEY", "default_name": "皿田"}
+        with patch.object(shift_app, "load_config", return_value=fake_cfg):
+            h_lan = _make_mock_handler("/api/config", method="GET", client_ip="192.168.1.50")
+            h_lan.do_GET()
+            lan_resp = json.loads(h_lan.wfile.getvalue().decode("utf-8"))
+            self.assertEqual(h_lan._status, 200)
+            self.assertEqual(lan_resp["api_key"], "")
+            self.assertTrue(lan_resp["has_api_key"])
+
+            h_local = _make_mock_handler("/api/config", method="GET", client_ip="127.0.0.1")
+            h_local.do_GET()
+            local_resp = json.loads(h_local.wfile.getvalue().decode("utf-8"))
+            self.assertEqual(local_resp["api_key"], "REAL_SECRET_KEY")
+            self.assertTrue(local_resp["has_api_key"])
+
+    def test_10_post_rejects_invalid_or_oversized_content_length(self):
+        """不正な Content-Length は400、上限超過は413を返すこと"""
+        h_bad = _make_mock_handler("/api/config", method="POST", headers={"Content-Length": "abc"})
+        h_bad.do_POST()
+        self.assertEqual(h_bad._status, 400)
+
+        oversized = str(shift_app.MAX_REQUEST_BODY_BYTES + 1)
+        h_big = _make_mock_handler("/api/config", method="POST", headers={"Content-Length": oversized})
+        h_big.do_POST()
+        self.assertEqual(h_big._status, 413)
+
+    def test_11_hot_reload_watches_shift_calendar_package_files(self):
+        """ホットリロード監視対象に app.py と shift_calendar/*.py が含まれること"""
+        mtimes = shift_app._get_watched_py_mtimes()
+        basenames = {os.path.basename(k) for k in mtimes.keys()}
+        self.assertIn("app.py", basenames)
+        self.assertIn("domain.py", basenames)
+        self.assertIn("gemini_client.py", basenames)
+        self.assertIn("storage.py", basenames)
+
 
 if __name__ == "__main__":
     unittest.main()

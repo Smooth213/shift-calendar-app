@@ -4,39 +4,11 @@ import subprocess
 import tempfile
 import unicodedata
 
-
-def _clamp_half_hour(val, default=0.0, min_val=0.0, max_val=24.0):
-    """数値を0.5時間（30分）刻みに丸め、min_val〜max_valの範囲に収める。"""
-    try:
-        num = float(val)
-    except (TypeError, ValueError):
-        num = float(default)
-    snapped = round(num * 2.0) / 2.0
-    clamped = max(float(min_val), min(float(max_val), snapped))
-    return 0.0 if clamped == 0.0 else clamped
-
-
-def format_hourly_leave_hours(hours):
-    """時間有給の数値を表示用文字列（例: '2', '1.5'）に整形する。0以下は空文字。"""
-    h = _clamp_half_hour(hours, 0.0, 0.0, 24.0)
-    if h <= 0.0:
-        return ""
-    if h.is_integer():
-        return str(int(h))
-    return f"{h:.1f}"
-
-
-def apply_hourly_leave_to_summary(summary, hours, status="work"):
-    """出勤日のカレンダー登録名末尾に（時間有給Xh）を付記／0時間や休み時は除去する。"""
-    base = str(summary or "").strip()
-    base = re.sub(r"\s*[（(]時間有給\s*[0-9]+(?:\.[0-9]+)?h[)）]\s*$", "", base).strip()
-    h = _clamp_half_hour(hours, 0.0, 0.0, 23.5)
-    if status == "work" and h > 0.0:
-        h_str = format_hourly_leave_hours(h)
-        if base:
-            return f"{base}（時間有給{h_str}h）"
-        return f"時間有給{h_str}h"
-    return base
+from shift_calendar.domain import (
+    _clamp_half_hour,
+    apply_hourly_leave_to_summary,
+    format_hourly_leave_hours,
+)
 
 
 

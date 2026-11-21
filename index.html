@@ -2295,6 +2295,7 @@
     let currentThemeMode = localStorage.getItem("shift_app_theme") || "system";
     let mobileAccessUrl = "";
     let isConfigLoaded = false;
+    let hasServerApiKey = false;
     let isOutdatedServerStopped = false;
     let activeHighlightKey = null;
     let selectedCalendarIdx = null;
@@ -2361,6 +2362,8 @@
         set themeMode(v) { currentThemeMode = v; },
         get isConfigLoaded() { return isConfigLoaded; },
         set isConfigLoaded(v) { isConfigLoaded = v; },
+        get hasServerApiKey() { return hasServerApiKey; },
+        set hasServerApiKey(v) { hasServerApiKey = Boolean(v); },
         get activeHighlightKey() { return activeHighlightKey; },
         set activeHighlightKey(v) { activeHighlightKey = v; },
         get selectedCalendarIdx() { return selectedCalendarIdx; },
@@ -2390,11 +2393,19 @@
       },
     };
 
-    // Shared JSON API Client Helper
+    // Shared JSON / Binary API Client Helper (all backend requests go through here)
     const ApiClient = {
+      async getRaw(url) {
+        return fetch(url);
+      },
       async getJson(url) {
         const res = await fetch(url);
-        return res.json();
+        return res && typeof res.json === "function" ? res.json() : null;
+      },
+      async getJsonWithRes(url) {
+        const res = await fetch(url);
+        const data = res && typeof res.json === "function" ? await res.json() : null;
+        return { res, data };
       },
       async postJson(url, payload) {
         const res = await fetch(url, {
@@ -2402,7 +2413,19 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        return { res, data: await res.json() };
+        const data = res && typeof res.json === "function" ? await res.json() : null;
+        return { res, data };
+      },
+      async postEmpty(url) {
+        return fetch(url, { method: "POST" });
+      },
+      async postBlob(url, payload) {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        return { res, blob: await res.blob() };
       },
     };
 
@@ -2538,7 +2561,7 @@
     // Heartbeat for auto termination on close
     async function sendHeartbeat() {
       try {
-        await fetch("/api/heartbeat");
+        await ApiClient.getRaw("/api/heartbeat");
         checkPreloadedImage();
       } catch (e) { }
     }
@@ -2565,13 +2588,12 @@
 
     async function initConfig() {
       try {
-        const res = await fetch("/api/config");
-        const data = await res.json();
+        const data = await ApiClient.getJson("/api/config");
         const isRealBrowserHttp = Boolean(window && window.location && /^https?:/.test(window.location.protocol || ""));
         if (isRealBrowserHttp && !data.server_version) {
           isOutdatedServerStopped = true;
           try {
-            await fetch("/api/shutdown", { method: "POST" });
+            await ApiClient.postEmpty("/api/shutdown");
           } catch (e) { }
           updateProgressUI(
             100,
@@ -2583,6 +2605,7 @@
           showToast("古いバックグラウンドサーバーを停止しました。もう一度クイックアクションを実行してください", "error");
           return;
         }
+        AppState.ui.hasServerApiKey = Boolean(data.has_api_key || (data.api_key && String(data.api_key).trim()));
         if (data.api_key) document.getElementById("api-key").value = data.api_key;
         if (data.default_name) document.getElementById("target-name").value = data.default_name;
         if (data.calendar_name) document.getElementById("calendar-name").value = data.calendar_name;
@@ -2691,33 +2714,39 @@
 
     initConfig();
 
-    function renderMasterDefs(defs) {
-      const container = document.getElementById("defs-container");
+    function renderLegendCapsules(containerId, defs, activeKey, onToggle, extraClass = "") {
+      const container = document.getElementById(containerId);
+      if (!container) return;
       container.innerHTML = "";
-      Object.keys(defs).forEach(k => {
+      const baseClass = extraClass ? `legend-capsule ${extraClass}` : "legend-capsule";
+
+      Object.keys(defs || {}).forEach(k => {
         const tag = document.createElement("div");
-        tag.className = `legend-capsule ${activeHighlightKey === k ? "is-active" : ""}`;
+        tag.className = `${baseClass} ${activeKey === k ? "is-active" : ""}`;
         tag.dataset.key = k;
         tag.title = "クリックでカレンダーの該当シフトをハイライト（再クリックで解除）";
-        tag.innerHTML = `<strong>${k}</strong> ${defs[k].start}〜${defs[k].end}`;
-        tag.addEventListener("click", () => toggleHighlight(k));
+        tag.innerHTML = `<strong>${escapeHtmlText(k)}</strong> ${escapeHtmlText(defs[k].start)}〜${escapeHtmlText(defs[k].end)}`;
+        tag.addEventListener("click", () => onToggle(k));
         container.appendChild(tag);
       });
-      const hol = document.createElement("div");
-      hol.className = `legend-capsule ${activeHighlightKey === "休" ? "is-active" : ""}`;
-      hol.dataset.key = "休";
-      hol.title = "クリックでカレンダーの休みをハイライト（再クリックで解除）";
-      hol.innerHTML = `<strong>休</strong> 終日休み`;
-      hol.addEventListener("click", () => toggleHighlight("休"));
-      container.appendChild(hol);
 
-      const paid = document.createElement("div");
-      paid.className = `legend-capsule ${activeHighlightKey === "有給" ? "is-active" : ""}`;
-      paid.dataset.key = "有給";
-      paid.title = "クリックでカレンダーの有給休暇をハイライト（再クリックで解除）";
-      paid.innerHTML = `<strong>有給</strong> 終日有給休暇`;
-      paid.addEventListener("click", () => toggleHighlight("有給"));
-      container.appendChild(paid);
+      const staticEntries = [
+        { key: "休", title: "クリックでカレンダーの休みをハイライト（再クリックで解除）", label: "終日休み" },
+        { key: "有給", title: "クリックでカレンダーの有給休暇をハイライト（再クリックで解除）", label: "終日有給休暇" },
+      ];
+      staticEntries.forEach(item => {
+        const el = document.createElement("div");
+        el.className = `${baseClass} ${activeKey === item.key ? "is-active" : ""}`;
+        el.dataset.key = item.key;
+        el.title = item.title;
+        el.innerHTML = `<strong>${escapeHtmlText(item.key)}</strong> ${escapeHtmlText(item.label)}`;
+        el.addEventListener("click", () => onToggle(item.key));
+        container.appendChild(el);
+      });
+    }
+
+    function renderMasterDefs(defs) {
+      renderLegendCapsules("defs-container", defs, AppState.ui.activeHighlightKey, toggleHighlight);
     }
 
     // 凡例クリックによるハイライト / 解除トグル
@@ -2816,8 +2845,7 @@
 
     async function loadHistoryList() {
       try {
-        const res = await fetch("/api/history");
-        const json = await res.json();
+        const json = await ApiClient.getJson("/api/history");
         const list = json.history || [];
         const registeredList = list.filter(i => Boolean(i.registered));
         const unregisteredList = list.filter(i => !i.registered);
@@ -2875,8 +2903,7 @@
           btnLoadHistory.disabled = true;
           btnLoadHistory.textContent = "読み込み中...";
         }
-        const res = await fetch(`/api/history/detail?id=${id}`);
-        const json = await res.json();
+        const json = await ApiClient.getJson(`/api/history/detail?id=${id}`);
         if (!json.success || !json.data) throw new Error("データの取得に失敗しました");
 
         const hist = json.data;
@@ -2958,12 +2985,7 @@
       if (!confirm("選択したシフト履歴を削除してもよろしいですか？")) return;
 
       try {
-        const res = await fetch("/api/history/delete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id })
-        });
-        const json = await res.json();
+        const { data: json } = await ApiClient.postJson("/api/history/delete", { id });
         if (json.success) {
           showToast("履歴を削除しました", "success");
           await loadHistoryList();
@@ -3025,12 +3047,7 @@
           payload.id = currentHistoryId;
         }
 
-        const res = await fetch("/api/history/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        const saved = res && typeof res.json === "function" ? await res.json() : null;
+        const { data: saved } = await ApiClient.postJson("/api/history/save", payload);
         if (saved && saved.id) {
           currentHistoryId = saved.id;
           if (!historyActiveInfo || historyActiveInfo.style.display !== "flex") {
@@ -3066,11 +3083,8 @@
         paid_leave_hours_per_day: hoursPerDay
       };
       try {
-        await fetch("/api/config", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(cfg)
-        });
+        await ApiClient.postJson("/api/config", cfg);
+        if (cfg.api_key) AppState.ui.hasServerApiKey = true;
         paidLeaveConfig = { startMonth, startDay, annualDays, hoursPerDay };
         syncPaidLeaveSettingsInputs();
         updateMonthlyMetrics();
@@ -3179,9 +3193,8 @@
 
     async function checkPreloadedImage() {
       try {
-        const res = await fetch("/api/get_preloaded");
-        const json = await res.json();
-        if (json.has_image && json.data) {
+        const json = await ApiClient.getJson("/api/get_preloaded");
+        if (json && json.has_image && json.data) {
           handlePreloadedImageData(json.data);
         }
       } catch (e) { }
@@ -3229,28 +3242,25 @@
           // 自動水平・垂直補正（Phase 1）を即座に適用
           currentDewarpStatus = "processing";
           updateDewarpStatusBadge(currentDewarpStatus);
-          fetch("/api/dewarp_preview", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ image_base64: currentImageBase64 })
-          }).then(r => r.json()).then(res => {
-            if (res.success) {
-              const status = res.dewarp_status || (res.corrected_image_base64 ? "applied" : "not_applied");
-              if (res.corrected_image_base64 && status !== "not_applied") {
-                currentImageBase64 = res.corrected_image_base64;
-                document.getElementById("compare-image").src = currentImageBase64;
-                if (thumb) thumb.src = currentImageBase64;
+          ApiClient.postJson("/api/dewarp_preview", { image_base64: currentImageBase64 })
+            .then(({ data: res }) => {
+              if (res && res.success) {
+                const status = res.dewarp_status || (res.corrected_image_base64 ? "applied" : "not_applied");
+                if (res.corrected_image_base64 && status !== "not_applied") {
+                  currentImageBase64 = res.corrected_image_base64;
+                  document.getElementById("compare-image").src = currentImageBase64;
+                  if (thumb) thumb.src = currentImageBase64;
+                }
+                currentDewarpStatus = status;
+                updateDewarpStatusBadge(currentDewarpStatus);
+              } else {
+                currentDewarpStatus = "not_applied";
+                updateDewarpStatusBadge(currentDewarpStatus);
               }
-              currentDewarpStatus = status;
-              updateDewarpStatusBadge(currentDewarpStatus);
-            } else {
+            }).catch(() => {
               currentDewarpStatus = "not_applied";
               updateDewarpStatusBadge(currentDewarpStatus);
-            }
-          }).catch(() => {
-            currentDewarpStatus = "not_applied";
-            updateDewarpStatusBadge(currentDewarpStatus);
-          });
+            });
         };
         img.src = rawData;
       };
@@ -3570,9 +3580,8 @@
       stopProgressPolling();
       progressPollTimer = setInterval(async () => {
         try {
-          const r = await fetch("/api/analyze_progress");
-          if (!r.ok) return;
-          const p = await r.json();
+          const { res: r, data: p } = await ApiClient.getJsonWithRes("/api/analyze_progress");
+          if (!r || !r.ok) return;
           if (p && p.active) {
             updateProgressUI(p.percent, p.phase, p.detail, p.step || 1, "running");
           }
@@ -3623,15 +3632,10 @@
       updateProgressUI(80, "ステップ 4/4: 下部の縦書き行事予定を読み取り中...", "シフト記号の表示は完了しました。続けて行事予定を抽出しています", 4, "running");
 
       try {
-        const evRes = await fetch("/api/analyze_events", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image_base64: currentImageBase64,
-            api_key: apiKey
-          })
+        const { res: evRes, data: evJson } = await ApiClient.postJson("/api/analyze_events", {
+          image_base64: currentImageBase64,
+          api_key: apiKey
         });
-        const evJson = await evRes.json();
         if (!evRes.ok || evJson.error) {
           throw new Error(evJson.error || "行事予定の読み取りに失敗しました");
         }
@@ -3649,7 +3653,7 @@
           skippedHolidaysListEl.innerHTML = `<span class="skipped-holiday-date">古いバックグラウンドサーバーが稼働していたため自動停止しました。もう一度クイックアクション（または launch.command）を実行してください。</span>`;
           setSkippedHolidaysPanelOpen(true);
           try {
-            await fetch("/api/shutdown", { method: "POST" });
+            await ApiClient.postEmpty("/api/shutdown");
           } catch (e) { }
         }
 
@@ -3707,7 +3711,7 @@
     if (btnRetryEventsEl) {
       btnRetryEventsEl.addEventListener("click", async () => {
         const apiKey = document.getElementById("api-key").value.trim();
-        if (!apiKey) { showToast("Gemini APIキーを入力してください", "error"); return; }
+        if (!apiKey && !AppState.ui.hasServerApiKey) { showToast("Gemini APIキーを入力してください", "error"); return; }
         analyzeStartTs = Date.now();
         startProgressPolling();
         try {
@@ -3725,14 +3729,14 @@
 
     // Analyze Action (2段階分離: Step 1 シフト記号 → Step 2 下部の縦書き行事予定)
     async function runShiftAnalysis() {
-      if (isAnalyzing) return;
+      if (AppState.analysis.isAnalyzing) return;
       const apiKey = document.getElementById("api-key").value.trim();
       const targetName = document.getElementById("target-name").value.trim();
 
-      if (!apiKey) { showToast("設定からGemini APIキーを入力してください", "error"); return; }
-      if (!currentImageBase64) { showToast("画像を選択してください", "error"); return; }
+      if (!apiKey && !AppState.ui.hasServerApiKey) { showToast("設定からGemini APIキーを入力してください", "error"); return; }
+      if (!AppState.analysis.imageBase64) { showToast("画像を選択してください", "error"); return; }
 
-      isAnalyzing = true;
+      AppState.analysis.isAnalyzing = true;
       renderSkippedHolidaysAccordion([]);
       btnAnalyze.disabled = true;
       btnAnalyze.textContent = "解析中...";
@@ -3742,19 +3746,14 @@
 
       try {
         // Step 1: シフト記号の解析のみを実行して即座に結果表示
-        const res = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image_base64: currentImageBase64,
-            mime_type: currentMimeType,
-            target_name: targetName,
-            api_key: apiKey,
-            time_definitions: masterTimeDefs
-          })
+        const { res, data: json } = await ApiClient.postJson("/api/analyze", {
+          image_base64: AppState.analysis.imageBase64,
+          mime_type: AppState.analysis.mimeType,
+          target_name: targetName,
+          api_key: apiKey,
+          time_definitions: AppState.analysis.masterTimeDefs
         });
 
-        const json = await res.json();
         if (!res.ok || json.error) throw new Error(json.error || "解析に失敗しました");
 
         // 【Phase 1】たわみ・歪み補正済み画像があればビュアーとサムネイルを更新
@@ -3933,172 +3932,149 @@
       });
     }
 
-    function renderResult(data) {
-      analyzedShifts = data.shifts || [];
-      selectedCalendarIdx = null;
-      if (viewerHighlightBox) viewerHighlightBox.style.display = "none";
-      document.getElementById("res-target-name").textContent = data.target_name || "皿田";
+    function createShiftTableRow(s, idx) {
+      const tr = document.createElement("tr");
 
-      // 月単位集計の更新
-      updateMonthlyMetrics();
+      let currentKey = s.type;
+      if (s.status === "holiday") currentKey = "休";
+      else if (s.status === "paid_leave") currentKey = "有給";
+      else if (!shiftOptions.some(opt => opt.key === currentKey)) currentKey = "その他";
 
-      // 1. Calendar
-      renderCalendar(analyzedShifts);
+      tr.dataset.key = currentKey;
+      tr.dataset.idx = idx;
+      if (AppState.ui.selectedCalendarIdx === idx) tr.classList.add("is-selected");
 
-      // 2. Table
-      const tbody = document.getElementById("shifts-tbody");
-      tbody.innerHTML = "";
-
-      analyzedShifts.forEach((s, idx) => {
-        const tr = document.createElement("tr");
-
-        let currentKey = s.type;
-        if (s.status === "holiday") currentKey = "休";
-        else if (s.status === "paid_leave") currentKey = "有給";
-        else if (!shiftOptions.some(opt => opt.key === currentKey)) currentKey = "その他";
-
-        tr.dataset.key = currentKey;
-        tr.dataset.idx = idx;
-        if (selectedCalendarIdx === idx) tr.classList.add("is-selected");
-
-        tr.addEventListener("mouseenter", () => {
-          selectCalendarDate(idx, { scrollTable: false, debounceImage: true });
-        });
-        tr.addEventListener("click", () => {
-          selectCalendarDate(idx, { scrollTable: false, debounceImage: false });
-        });
-        tr.addEventListener("focusin", () => {
-          selectCalendarDate(idx, { scrollTable: false, debounceImage: false });
-        });
-
-        let selectOptionsHtml = "";
-        shiftOptions.forEach(opt => {
-          const selected = (opt.key === currentKey) ? "selected" : "";
-          selectOptionsHtml += `<option value="${opt.key}" ${selected}>${opt.label}</option>`;
-        });
-
-        const dayColor = s.day_of_week === "土" ? "color:var(--accent);font-weight:600;" : (s.day_of_week === "日" ? "color:#ff453a;font-weight:600;" : "");
-
-        const isWorkRow = s.status === "work";
-        const curHourlyLeave = isWorkRow ? clampHalfHour(s.hourly_paid_leave, 0, 0, paidLeaveConfig.hoursPerDay - 0.5) : 0;
-        const hourlyOptionsHtml = buildHourlyLeaveOptionsHtml(curHourlyLeave, paidLeaveConfig.hoursPerDay);
-
-        tr.innerHTML = `
-          <td style="text-align: center;">
-            <input type="checkbox" class="shift-check" data-idx="${idx}" checked>
-          </td>
-          <td><strong>${s.date}</strong></td>
-          <td style="${dayColor}">${s.day_of_week || ""}</td>
-          <td>
-            <select class="table-select shift-select" data-idx="${idx}">
-              ${selectOptionsHtml}
-            </select>
-          </td>
-          <td>
-            <input type="time" class="input-text shift-time-start" style="height: 26px; padding: 0 10px; width: 88px;" value="${s.start_time || ""}" data-idx="${idx}" data-field="start_time" ${s.status !== "work" ? "disabled" : ""}>
-          </td>
-          <td>
-            <input type="time" class="input-text shift-time-end" style="height: 26px; padding: 0 10px; width: 88px;" value="${s.end_time || ""}" data-idx="${idx}" data-field="end_time" ${s.status !== "work" ? "disabled" : ""}>
-          </td>
-          <td>
-            <select class="table-select shift-hourly-leave" style="height: 26px; font-size: 11px;" data-idx="${idx}" ${!isWorkRow ? "disabled" : ""}>
-              ${hourlyOptionsHtml}
-            </select>
-          </td>
-          <td>
-            <input type="text" class="input-text shift-summary" style="height: 26px; width: 100%;" value="${escapeHtmlText(s.summary || "")}" data-idx="${idx}" data-field="summary">
-          </td>
-          <td>
-            <input type="text" class="input-text shift-event" style="height: 26px; width: 100%;" value="${escapeHtmlText(s.event || "")}" data-idx="${idx}" data-field="event" placeholder="なし">
-          </td>
-        `;
-        tbody.appendChild(tr);
+      tr.addEventListener("mouseenter", () => {
+        selectCalendarDate(idx, { scrollTable: false, debounceImage: true });
+      });
+      tr.addEventListener("click", () => {
+        selectCalendarDate(idx, { scrollTable: false, debounceImage: false });
+      });
+      tr.addEventListener("focusin", () => {
+        selectCalendarDate(idx, { scrollTable: false, debounceImage: false });
       });
 
+      const selectOptionsHtml = shiftOptions
+        .map(opt => `<option value="${opt.key}" ${opt.key === currentKey ? "selected" : ""}>${opt.label}</option>`)
+        .join("");
+
+      const dayColor = s.day_of_week === "土" ? "color:var(--accent);font-weight:600;" : (s.day_of_week === "日" ? "color:#ff453a;font-weight:600;" : "");
+      const isWorkRow = s.status === "work";
+      const curHourlyLeave = isWorkRow ? clampHalfHour(s.hourly_paid_leave, 0, 0, paidLeaveConfig.hoursPerDay - 0.5) : 0;
+      const hourlyOptionsHtml = buildHourlyLeaveOptionsHtml(curHourlyLeave, paidLeaveConfig.hoursPerDay);
+
+      tr.innerHTML = `
+        <td style="text-align: center;">
+          <input type="checkbox" class="shift-check" data-idx="${idx}" checked>
+        </td>
+        <td><strong>${escapeHtmlText(s.date)}</strong></td>
+        <td style="${dayColor}">${escapeHtmlText(s.day_of_week || "")}</td>
+        <td>
+          <select class="table-select shift-select" data-idx="${idx}">
+            ${selectOptionsHtml}
+          </select>
+        </td>
+        <td>
+          <input type="time" class="input-text shift-time-start" style="height: 26px; padding: 0 10px; width: 88px;" value="${escapeHtmlText(s.start_time || "")}" data-idx="${idx}" data-field="start_time" ${s.status !== "work" ? "disabled" : ""}>
+        </td>
+        <td>
+          <input type="time" class="input-text shift-time-end" style="height: 26px; padding: 0 10px; width: 88px;" value="${escapeHtmlText(s.end_time || "")}" data-idx="${idx}" data-field="end_time" ${s.status !== "work" ? "disabled" : ""}>
+        </td>
+        <td>
+          <select class="table-select shift-hourly-leave" style="height: 26px; font-size: 11px;" data-idx="${idx}" ${!isWorkRow ? "disabled" : ""}>
+            ${hourlyOptionsHtml}
+          </select>
+        </td>
+        <td>
+          <input type="text" class="input-text shift-summary" style="height: 26px; width: 100%;" value="${escapeHtmlText(s.summary || "")}" data-idx="${idx}" data-field="summary">
+        </td>
+        <td>
+          <input type="text" class="input-text shift-event" style="height: 26px; width: 100%;" value="${escapeHtmlText(s.event || "")}" data-idx="${idx}" data-field="event" placeholder="なし">
+        </td>
+      `;
+      return tr;
+    }
+
+    function applyShiftTypeSelection(idx, chosenKey, tr) {
+      const inputStart = tr.querySelector(".shift-time-start");
+      const inputEnd = tr.querySelector(".shift-time-end");
+      const inputSummary = tr.querySelector(".shift-summary");
+      const selectHourly = tr.querySelector(".shift-hourly-leave");
+      const matchedOpt = shiftOptions.find(o => o.key === chosenKey);
+
+      if (chosenKey === "休") {
+        analyzedShifts[idx].type = "休";
+        analyzedShifts[idx].status = "holiday";
+        analyzedShifts[idx].is_holiday = true;
+        analyzedShifts[idx].is_paid_leave = false;
+        analyzedShifts[idx].hourly_paid_leave = 0;
+        analyzedShifts[idx].start_time = null;
+        analyzedShifts[idx].end_time = null;
+        analyzedShifts[idx].summary = "休み";
+
+        inputStart.value = "";
+        inputEnd.value = "";
+        inputStart.disabled = true;
+        inputEnd.disabled = true;
+        if (selectHourly) { selectHourly.value = "0"; selectHourly.disabled = true; }
+        inputSummary.value = "休み";
+      } else if (chosenKey === "㊒") {
+        analyzedShifts[idx].type = "有給";
+        analyzedShifts[idx].status = "paid_leave";
+        analyzedShifts[idx].is_holiday = false;
+        analyzedShifts[idx].is_paid_leave = true;
+        analyzedShifts[idx].hourly_paid_leave = 0;
+        analyzedShifts[idx].start_time = null;
+        analyzedShifts[idx].end_time = null;
+        analyzedShifts[idx].summary = "有給休暇";
+
+        inputStart.value = "";
+        inputEnd.value = "";
+        inputStart.disabled = true;
+        inputEnd.disabled = true;
+        if (selectHourly) { selectHourly.value = "0"; selectHourly.disabled = true; }
+        inputSummary.value = "有給休暇";
+      } else if (matchedOpt && matchedOpt.status === "work") {
+        analyzedShifts[idx].type = chosenKey;
+        analyzedShifts[idx].status = "work";
+        analyzedShifts[idx].is_holiday = false;
+        analyzedShifts[idx].is_paid_leave = false;
+        const curH = clampHalfHour(analyzedShifts[idx].hourly_paid_leave, 0, 0, paidLeaveConfig.hoursPerDay - 0.5);
+
+        if (chosenKey !== "その他") {
+          analyzedShifts[idx].start_time = matchedOpt.start;
+          analyzedShifts[idx].end_time = matchedOpt.end;
+          analyzedShifts[idx].summary = applyHourlyLeaveToSummary(`[${chosenKey}] (${matchedOpt.start}〜${matchedOpt.end})`, curH, "work");
+          inputStart.value = matchedOpt.start;
+          inputEnd.value = matchedOpt.end;
+          inputSummary.value = analyzedShifts[idx].summary;
+        } else {
+          analyzedShifts[idx].summary = applyHourlyLeaveToSummary(`[勤務]`, curH, "work");
+          inputSummary.value = analyzedShifts[idx].summary;
+        }
+
+        inputStart.disabled = false;
+        inputEnd.disabled = false;
+        if (selectHourly) selectHourly.disabled = false;
+      }
+
+      tr.dataset.key = chosenKey === "㊒" ? "有給" : chosenKey;
+      updateMonthlyMetrics();
+      renderCalendar(analyzedShifts);
+      applyHighlightFilter();
+    }
+
+    function bindShiftTableEvents(tbody) {
       tbody.querySelectorAll(".shift-check").forEach(cb => cb.addEventListener("change", updateFooterCount));
 
-      // Dropdown selection change
       tbody.querySelectorAll(".shift-select").forEach(sel => {
         sel.addEventListener("change", (e) => {
           const idx = parseInt(e.target.dataset.idx, 10);
-          const chosenKey = e.target.value;
           const tr = e.target.closest("tr");
-          const inputStart = tr.querySelector(".shift-time-start");
-          const inputEnd = tr.querySelector(".shift-time-end");
-          const inputSummary = tr.querySelector(".shift-summary");
-          const selectHourly = tr.querySelector(".shift-hourly-leave");
-
-          const matchedOpt = shiftOptions.find(o => o.key === chosenKey);
-
-          if (chosenKey === "休") {
-            analyzedShifts[idx].type = "休";
-            analyzedShifts[idx].status = "holiday";
-            analyzedShifts[idx].is_holiday = true;
-            analyzedShifts[idx].is_paid_leave = false;
-            analyzedShifts[idx].hourly_paid_leave = 0;
-            analyzedShifts[idx].start_time = null;
-            analyzedShifts[idx].end_time = null;
-            analyzedShifts[idx].summary = "休み";
-
-            inputStart.value = "";
-            inputEnd.value = "";
-            inputStart.disabled = true;
-            inputEnd.disabled = true;
-            if (selectHourly) { selectHourly.value = "0"; selectHourly.disabled = true; }
-            inputSummary.value = "休み";
-          } else if (chosenKey === "㊒") {
-            analyzedShifts[idx].type = "有給";
-            analyzedShifts[idx].status = "paid_leave";
-            analyzedShifts[idx].is_holiday = false;
-            analyzedShifts[idx].is_paid_leave = true;
-            analyzedShifts[idx].hourly_paid_leave = 0;
-            analyzedShifts[idx].start_time = null;
-            analyzedShifts[idx].end_time = null;
-            analyzedShifts[idx].summary = "有給休暇";
-
-            inputStart.value = "";
-            inputEnd.value = "";
-            inputStart.disabled = true;
-            inputEnd.disabled = true;
-            if (selectHourly) { selectHourly.value = "0"; selectHourly.disabled = true; }
-            inputSummary.value = "有給休暇";
-          } else if (matchedOpt && matchedOpt.status === "work") {
-            analyzedShifts[idx].type = chosenKey;
-            analyzedShifts[idx].status = "work";
-            analyzedShifts[idx].is_holiday = false;
-            analyzedShifts[idx].is_paid_leave = false;
-            const curH = clampHalfHour(analyzedShifts[idx].hourly_paid_leave, 0, 0, paidLeaveConfig.hoursPerDay - 0.5);
-
-            if (chosenKey !== "その他") {
-              analyzedShifts[idx].start_time = matchedOpt.start;
-              analyzedShifts[idx].end_time = matchedOpt.end;
-              analyzedShifts[idx].summary = applyHourlyLeaveToSummary(`[${chosenKey}] (${matchedOpt.start}〜${matchedOpt.end})`, curH, "work");
-
-              inputStart.value = matchedOpt.start;
-              inputEnd.value = matchedOpt.end;
-              inputSummary.value = analyzedShifts[idx].summary;
-            } else {
-              analyzedShifts[idx].summary = applyHourlyLeaveToSummary(`[勤務]`, curH, "work");
-              inputSummary.value = analyzedShifts[idx].summary;
-            }
-
-            inputStart.disabled = false;
-            inputEnd.disabled = false;
-            if (selectHourly) selectHourly.disabled = false;
-          }
-
-          let newKey = chosenKey;
-          if (chosenKey === "㊒") newKey = "有給";
-          tr.dataset.key = newKey;
-
-          // 月単位の集計をリアルタイム再計算
-          updateMonthlyMetrics();
-          renderCalendar(analyzedShifts);
-          applyHighlightFilter();
+          applyShiftTypeSelection(idx, e.target.value, tr);
         });
       });
 
-      // Hourly paid leave dropdown change
       tbody.querySelectorAll(".shift-hourly-leave").forEach(sel => {
         sel.addEventListener("change", (e) => {
           const idx = parseInt(e.target.dataset.idx, 10);
@@ -4117,7 +4093,6 @@
         });
       });
 
-      // Text input change
       tbody.querySelectorAll("input[data-field]").forEach(input => {
         input.addEventListener("change", (e) => {
           const idx = parseInt(e.target.dataset.idx, 10);
@@ -4130,11 +4105,27 @@
           }
         });
       });
+    }
+
+    function renderResult(data) {
+      AppState.analysis.shifts = data.shifts || [];
+      AppState.ui.selectedCalendarIdx = null;
+      if (viewerHighlightBox) viewerHighlightBox.style.display = "none";
+      document.getElementById("res-target-name").textContent = data.target_name || "皿田";
+
+      updateMonthlyMetrics();
+      renderCalendar(AppState.analysis.shifts);
+
+      const tbody = document.getElementById("shifts-tbody");
+      tbody.innerHTML = "";
+      AppState.analysis.shifts.forEach((s, idx) => {
+        tbody.appendChild(createShiftTableRow(s, idx));
+      });
+      bindShiftTableEvents(tbody);
 
       updateFooterCount();
       applyHighlightFilter();
       document.getElementById("result-container").style.display = "flex";
-      // 解析完了時に自動的に元画像ビューワーを展開して全体表示
       openViewer(true);
       document.getElementById("result-container").scrollIntoView({ behavior: "smooth" });
     }
@@ -4344,19 +4335,14 @@
           image_name: currentImageName,
           dewarp_status: currentDewarpStatus
         };
-        const res = await fetch("/api/register", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            shifts: selected,
-            calendar_name: calName,
-            include_events: isIncludeEventsEnabled(),
-            history_id: currentHistoryId,
-            history_payload: historyPayload
-          })
+        const { res, data: json } = await ApiClient.postJson("/api/register", {
+          shifts: selected,
+          calendar_name: calName,
+          include_events: isIncludeEventsEnabled(),
+          history_id: AppState.history.currentId,
+          history_payload: historyPayload
         });
 
-        const json = await res.json();
         if (!res.ok || json.error) throw new Error(json.error || "登録に失敗しました");
 
         if (json.history_id) {
@@ -4398,17 +4384,11 @@
 
       try {
         const calName = document.getElementById("calendar-name").value.trim() || "シフトカレンダー";
-        const res = await fetch("/api/export_ics", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            shifts: selected,
-            calendar_name: calName,
-            include_events: isIncludeEventsEnabled()
-          })
+        const { blob } = await ApiClient.postBlob("/api/export_ics", {
+          shifts: selected,
+          calendar_name: calName,
+          include_events: isIncludeEventsEnabled()
         });
-
-        const blob = await res.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -4503,35 +4483,13 @@
     }
 
     function renderCalendarViewDefs(defs) {
-      const container = document.getElementById("cal-view-defs-container");
-      if (!container) return;
-      container.innerHTML = "";
-      const keys = Object.keys(defs || {});
-      keys.forEach(k => {
-        const tag = document.createElement("div");
-        tag.className = `legend-capsule cal-view-legend ${calendarHighlightKey === k ? "is-active" : ""}`;
-        tag.dataset.key = k;
-        tag.title = "クリックでカレンダーの該当シフトをハイライト（再クリックで解除）";
-        tag.innerHTML = `<strong>${escapeHtmlText(k)}</strong> ${escapeHtmlText(defs[k].start)}〜${escapeHtmlText(defs[k].end)}`;
-        tag.addEventListener("click", () => toggleCalendarViewHighlight(k));
-        container.appendChild(tag);
-      });
-
-      const hol = document.createElement("div");
-      hol.className = `legend-capsule cal-view-legend ${calendarHighlightKey === "休" ? "is-active" : ""}`;
-      hol.dataset.key = "休";
-      hol.title = "クリックでカレンダーの休みをハイライト（再クリックで解除）";
-      hol.innerHTML = `<strong>休</strong> 終日休み`;
-      hol.addEventListener("click", () => toggleCalendarViewHighlight("休"));
-      container.appendChild(hol);
-
-      const paid = document.createElement("div");
-      paid.className = `legend-capsule cal-view-legend ${calendarHighlightKey === "有給" ? "is-active" : ""}`;
-      paid.dataset.key = "有給";
-      paid.title = "クリックでカレンダーの有給休暇をハイライト（再クリックで解除）";
-      paid.innerHTML = `<strong>有給</strong> 終日有給休暇`;
-      paid.addEventListener("click", () => toggleCalendarViewHighlight("有給"));
-      container.appendChild(paid);
+      renderLegendCapsules(
+        "cal-view-defs-container",
+        defs,
+        AppState.calendar.highlightKey,
+        toggleCalendarViewHighlight,
+        "cal-view-legend"
+      );
     }
 
     function toggleCalendarViewHighlight(key) {
@@ -4705,9 +4663,7 @@
       detailCard.classList.add("is-visible");
     }
 
-    function renderMonthlyCalendarView() {
-      const monthLabelEl = document.getElementById("cal-current-month-label");
-      const summaryTitleEl = document.getElementById("cal-summary-month-title");
+    function updateMonthlyCalendarSummaries(ymPrefix, hpd) {
       const summaryTotalEl = document.getElementById("cal-summary-total-days");
       const summaryWorkEl = document.getElementById("cal-summary-work-days");
       const summaryHolEl = document.getElementById("cal-summary-holiday-days");
@@ -4719,21 +4675,12 @@
       const annualTotalEl = document.getElementById("cal-annual-leave-total");
       const annualProgressEl = document.getElementById("cal-annual-leave-progress");
 
-      const grid = document.getElementById("monthly-calendar-body");
-      const emptyBanner = document.getElementById("monthly-calendar-empty");
-      const emptyText = document.getElementById("monthly-calendar-empty-text");
-
-      const ymPrefix = `${calendarViewYear}-${pad2(calendarViewMonth)}`;
-      if (monthLabelEl) monthLabelEl.textContent = `${calendarViewYear}年 ${calendarViewMonth}月`;
-      if (summaryTitleEl) summaryTitleEl.textContent = `${calendarViewYear}年${calendarViewMonth}月 集計`;
-
-      // 1. Monthly metrics (8時間換算・0.5時間刻み)
-      const hpd = clampHalfHour(paidLeaveConfig.hoursPerDay, 8, 1, 24);
       const halfPerDay = Math.max(2, Math.round(hpd * 2));
       let mWork = 0;
       let mHoliday = 0;
       let mPaidHalfHours = 0;
       let mTotal = 0;
+
       Object.keys(calendarShiftsByDate).forEach(dateStr => {
         if (!dateStr.startsWith(ymPrefix + "-")) return;
         const s = calendarShiftsByDate[dateStr];
@@ -4755,7 +4702,6 @@
       if (summaryHolEl) summaryHolEl.textContent = `${mHoliday}日`;
       if (summaryPaidEl) summaryPaidEl.textContent = formatPaidLeaveDaysAndHours(mPaidHalfHours, hpd);
 
-      // 2. Annual paid leave count (常に X日 Y時間 表記)
       const fiscal = computePaidLeaveFiscalPeriod(
         calendarViewYear,
         calendarViewMonth,
@@ -4796,8 +4742,108 @@
         annualProgressEl.style.width = `${pct}%`;
         annualProgressEl.classList.toggle("is-over", isOver);
       }
+      return mTotal;
+    }
 
-      // 3. Full Monthly Grid (Sunday first)
+    function createMonthlyCalendarCell(cellDate, todayStr, hpd) {
+      const cy = cellDate.getFullYear();
+      const cm = cellDate.getMonth() + 1;
+      const cd = cellDate.getDate();
+      const dow = cellDate.getDay();
+      const dateStr = formatDateYMD(cy, cm, cd);
+      const isOutside = (cy !== calendarViewYear || cm !== calendarViewMonth);
+      const isToday = (dateStr === todayStr);
+      const shift = calendarShiftsByDate[dateStr] || null;
+
+      const cell = document.createElement("div");
+      const dowClass = dow === 0 ? "sun" : (dow === 6 ? "sat" : "");
+      const classes = ["cal-cell"];
+      if (dowClass) classes.push(dowClass);
+      if (isOutside) classes.push("is-outside-month");
+      if (isToday) classes.push("is-today");
+      if (calendarSelectedDate === dateStr) classes.push("is-selected");
+      cell.className = classes.join(" ");
+      cell.dataset.date = dateStr;
+
+      const dayNumHtml = isToday
+        ? `<span class="cal-today-badge">${cd}</span>`
+        : `<span>${cd}</span>`;
+      const monthSubHtml = (isOutside || cd === 1)
+        ? `<span style="font-size: 9px; color: var(--label-tertiary);">${cm}月</span>`
+        : "";
+
+      let bodyHtml = "";
+      if (shift) {
+        let statusClass = "work";
+        let titleLabel = shift.type || "出勤";
+        let timeLabel = shift.start_time && shift.end_time ? `${shift.start_time}〜${shift.end_time}` : "";
+        const itemKey = getShiftItemKey(shift);
+        if (shift.status === "holiday" || shift.is_holiday) {
+          statusClass = "holiday";
+          titleLabel = "休み";
+          timeLabel = "終日";
+        } else if (shift.status === "paid_leave" || shift.is_paid_leave) {
+          statusClass = "paid";
+          titleLabel = "有給休暇";
+          timeLabel = "終日";
+        }
+        const isWorkShift = !(shift.status === "holiday" || shift.is_holiday || shift.status === "paid_leave" || shift.is_paid_leave);
+        const hLeaveCell = isWorkShift ? clampHalfHour(shift.hourly_paid_leave, 0, 0, hpd - 0.5) : 0;
+        const hourlyBadgeHtml = hLeaveCell > 0
+          ? `<div class="cal-hourly-leave-pill" title="時間有給: ${formatHoursNum(hLeaveCell)}時間">時間有給 ${formatHoursNum(hLeaveCell)}h</div>`
+          : "";
+        const eventText = shift.event ? String(shift.event).trim() : "";
+        const eventBadgeHtml = eventText
+          ? `<div class="cal-day-event-pill" title="行事予定: ${escapeHtmlText(eventText)}">${escapeHtmlText(eventText)}</div>`
+          : "";
+        bodyHtml = `
+          <div class="cal-event-capsule ${statusClass}" data-key="${escapeHtmlText(itemKey)}">
+            <div class="cal-capsule-title">${escapeHtmlText(titleLabel)}</div>
+            <div class="cal-capsule-time">${escapeHtmlText(timeLabel)}</div>
+          </div>
+          ${hourlyBadgeHtml}
+          ${eventBadgeHtml}
+        `;
+        cell.style.cursor = "pointer";
+        cell.title = "クリックして詳細・元画像を開く";
+        cell.addEventListener("click", () => {
+          AppState.calendar.selectedDate = dateStr;
+          renderMonthlyCalendarView();
+        });
+      } else if (isOutside) {
+        cell.style.cursor = "pointer";
+        cell.addEventListener("click", () => {
+          AppState.calendar.viewYear = cy;
+          AppState.calendar.viewMonth = cm;
+          AppState.calendar.selectedDate = null;
+          renderMonthlyCalendarView();
+        });
+      }
+
+      cell.innerHTML = `
+        <div class="cal-cell-header">
+          ${dayNumHtml}
+          ${monthSubHtml}
+        </div>
+        ${bodyHtml}
+      `;
+      return cell;
+    }
+
+    function renderMonthlyCalendarView() {
+      const monthLabelEl = document.getElementById("cal-current-month-label");
+      const summaryTitleEl = document.getElementById("cal-summary-month-title");
+      const grid = document.getElementById("monthly-calendar-body");
+      const emptyBanner = document.getElementById("monthly-calendar-empty");
+      const emptyText = document.getElementById("monthly-calendar-empty-text");
+
+      const ymPrefix = `${calendarViewYear}-${pad2(calendarViewMonth)}`;
+      if (monthLabelEl) monthLabelEl.textContent = `${calendarViewYear}年 ${calendarViewMonth}月`;
+      if (summaryTitleEl) summaryTitleEl.textContent = `${calendarViewYear}年${calendarViewMonth}月 集計`;
+
+      const hpd = clampHalfHour(paidLeaveConfig.hoursPerDay, 8, 1, 24);
+      const mTotal = updateMonthlyCalendarSummaries(ymPrefix, hpd);
+
       if (!grid) return;
       grid.innerHTML = "";
 
@@ -4812,88 +4858,7 @@
       for (let slot = 0; slot < totalSlots; slot++) {
         const dayOffset = slot - startDow + 1;
         const cellDate = new Date(calendarViewYear, calendarViewMonth - 1, dayOffset);
-        const cy = cellDate.getFullYear();
-        const cm = cellDate.getMonth() + 1;
-        const cd = cellDate.getDate();
-        const dow = cellDate.getDay();
-        const dateStr = formatDateYMD(cy, cm, cd);
-        const isOutside = (cy !== calendarViewYear || cm !== calendarViewMonth);
-        const isToday = (dateStr === todayStr);
-        const shift = calendarShiftsByDate[dateStr] || null;
-
-        const cell = document.createElement("div");
-        const dowClass = dow === 0 ? "sun" : (dow === 6 ? "sat" : "");
-        const classes = ["cal-cell"];
-        if (dowClass) classes.push(dowClass);
-        if (isOutside) classes.push("is-outside-month");
-        if (isToday) classes.push("is-today");
-        if (calendarSelectedDate === dateStr) classes.push("is-selected");
-        cell.className = classes.join(" ");
-        cell.dataset.date = dateStr;
-
-        const dayNumHtml = isToday
-          ? `<span class="cal-today-badge">${cd}</span>`
-          : `<span>${cd}</span>`;
-        const monthSubHtml = (isOutside || cd === 1)
-          ? `<span style="font-size: 9px; color: var(--label-tertiary);">${cm}月</span>`
-          : "";
-
-        let bodyHtml = "";
-        if (shift) {
-          let statusClass = "work";
-          let titleLabel = shift.type || "出勤";
-          let timeLabel = shift.start_time && shift.end_time ? `${shift.start_time}〜${shift.end_time}` : "";
-          const itemKey = getShiftItemKey(shift);
-          if (shift.status === "holiday" || shift.is_holiday) {
-            statusClass = "holiday";
-            titleLabel = "休み";
-            timeLabel = "終日";
-          } else if (shift.status === "paid_leave" || shift.is_paid_leave) {
-            statusClass = "paid";
-            titleLabel = "有給休暇";
-            timeLabel = "終日";
-          }
-          const isWorkShift = !(shift.status === "holiday" || shift.is_holiday || shift.status === "paid_leave" || shift.is_paid_leave);
-          const hLeaveCell = isWorkShift ? clampHalfHour(shift.hourly_paid_leave, 0, 0, hpd - 0.5) : 0;
-          const hourlyBadgeHtml = hLeaveCell > 0
-            ? `<div class="cal-hourly-leave-pill" title="時間有給: ${formatHoursNum(hLeaveCell)}時間">時間有給 ${formatHoursNum(hLeaveCell)}h</div>`
-            : "";
-          const eventText = shift.event ? String(shift.event).trim() : "";
-          const eventBadgeHtml = eventText
-            ? `<div class="cal-day-event-pill" title="行事予定: ${escapeHtmlText(eventText)}">${escapeHtmlText(eventText)}</div>`
-            : "";
-          bodyHtml = `
-            <div class="cal-event-capsule ${statusClass}" data-key="${escapeHtmlText(itemKey)}">
-              <div class="cal-capsule-title">${escapeHtmlText(titleLabel)}</div>
-              <div class="cal-capsule-time">${escapeHtmlText(timeLabel)}</div>
-            </div>
-            ${hourlyBadgeHtml}
-            ${eventBadgeHtml}
-          `;
-          cell.style.cursor = "pointer";
-          cell.title = "クリックして詳細・元画像を開く";
-          cell.addEventListener("click", () => {
-            calendarSelectedDate = dateStr;
-            renderMonthlyCalendarView();
-          });
-        } else if (isOutside) {
-          cell.style.cursor = "pointer";
-          cell.addEventListener("click", () => {
-            calendarViewYear = cy;
-            calendarViewMonth = cm;
-            calendarSelectedDate = null;
-            renderMonthlyCalendarView();
-          });
-        }
-
-        cell.innerHTML = `
-          <div class="cal-cell-header">
-            ${dayNumHtml}
-            ${monthSubHtml}
-          </div>
-          ${bodyHtml}
-        `;
-        grid.appendChild(cell);
+        grid.appendChild(createMonthlyCalendarCell(cellDate, todayStr, hpd));
       }
 
       if (emptyBanner) {
@@ -4913,12 +4878,11 @@
 
     async function fetchRegisteredCalendarShifts() {
       try {
-        const res = await fetch("/api/calendar_shifts");
+        const { res, data: json } = await ApiClient.getJsonWithRes("/api/calendar_shifts");
         if (!res || !res.ok) return;
-        const json = await res.json();
         if (json && json.success) {
-          calendarShiftsByDate = json.shifts_by_date || {};
-          calendarAvailableMonths = Array.isArray(json.available_months) ? json.available_months : [];
+          AppState.calendar.shiftsByDate = json.shifts_by_date || {};
+          AppState.calendar.availableMonths = Array.isArray(json.available_months) ? json.available_months : [];
           renderMonthlyCalendarView();
         }
       } catch (e) {
@@ -5009,19 +4973,14 @@
         btnCalSaveHourlyLeaveEl.disabled = true;
         btnCalSaveHourlyLeaveEl.textContent = "保存中...";
         try {
-          const res = await fetch("/api/calendar_shifts/hourly_leave", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              history_id: histId,
-              date: targetDate,
-              hourly_paid_leave: hours,
-              sync_apple_calendar: syncApple,
-              calendar_name: calName,
-              include_events: isIncludeEventsEnabled()
-            })
+          const { res, data: json } = await ApiClient.postJson("/api/calendar_shifts/hourly_leave", {
+            history_id: histId,
+            date: targetDate,
+            hourly_paid_leave: hours,
+            sync_apple_calendar: syncApple,
+            calendar_name: calName,
+            include_events: isIncludeEventsEnabled()
           });
-          const json = await res.json();
           if (!res.ok || !json.success) {
             throw new Error(json.error || "時間有給の保存に失敗しました");
           }
