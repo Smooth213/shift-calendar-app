@@ -970,6 +970,478 @@ vm.runInContext(scriptMatch[1], context);
         # 5) summary未設定時のフォールバック
         self.assertIn("[早C] (07:00〜16:00)", res["2026-11-06"])
 
+    def test_10_calendar_shift_tones_and_multiline_summary(self):
+        """カレンダータブのシフト記号別時間帯カラーと改行表示（[記号]/(時間)/（時間有給Xh））を検証"""
+        res = self._run_node(r"""
+  vm.runInContext(`
+    masterTimeDefs = {
+      "早A": { start: "06:00", end: "15:00" },
+      "早B": { start: "06:30", end: "15:30" },
+      "早C": { start: "07:00", end: "16:00" },
+      "早D": { start: "08:00", end: "17:00" },
+      "日":  { start: "08:30", end: "17:30" },
+      "遅A": { start: "09:00", end: "18:00" },
+      "遅B": { start: "09:30", end: "18:30" },
+      "遅C": { start: "10:00", end: "19:00" }
+    };
+    renderCalendarViewDefs(masterTimeDefs);
+    calendarShiftsByDate = {
+      "2026-11-01": { date: "2026-11-01", type: "早A", status: "work", start_time: "06:00", end_time: "15:00", summary: "[早A] (06:00〜15:00)", hourly_paid_leave: 1.5, history_id: "h1" },
+      "2026-11-02": { date: "2026-11-02", type: "早B", status: "work", start_time: "06:30", end_time: "15:30", summary: "[早B] (06:30〜15:30)", history_id: "h1" },
+      "2026-11-03": { date: "2026-11-03", type: "早C", status: "work", start_time: "07:00", end_time: "16:00", summary: "[早C] (07:00〜16:00)", history_id: "h1" },
+      "2026-11-04": { date: "2026-11-04", type: "早D", status: "work", start_time: "08:00", end_time: "17:00", summary: "[早D] (08:00〜17:00)", history_id: "h1" },
+      "2026-11-05": { date: "2026-11-05", type: "日",  status: "work", start_time: "08:30", end_time: "17:30", summary: "[日] (08:30〜17:30)", history_id: "h1" },
+      "2026-11-06": { date: "2026-11-06", type: "遅A", status: "work", start_time: "09:00", end_time: "18:00", summary: "[遅A] (09:00〜18:00)", history_id: "h1" },
+      "2026-11-07": { date: "2026-11-07", type: "遅B", status: "work", start_time: "09:30", end_time: "18:30", summary: "[遅B] (09:30〜18:30)", history_id: "h1" },
+      "2026-11-08": { date: "2026-11-08", type: "遅C", status: "work", start_time: "10:00", end_time: "19:00", summary: "[遅C] (10:00〜19:00)", history_id: "h1" },
+      "2026-11-09": { date: "2026-11-09", type: "カスタム早", status: "work", start_time: "06:00", end_time: "15:00", summary: "[カスタム早] (06:00〜15:00)", history_id: "h1" },
+      "2026-11-10": { date: "2026-11-10", type: "カスタム遅", status: "work", start_time: "11:00", end_time: "20:00", summary: "[カスタム遅] (11:00〜20:00)", history_id: "h1" }
+    };
+    paidLeaveConfig = { startMonth: 4, startDay: 1, annualDays: 20, hoursPerDay: 8 };
+    calendarViewYear = 2026;
+    calendarViewMonth = 11;
+    renderMonthlyCalendarView();
+  `, context);
+
+  const cells = getEl("monthly-calendar-body").children;
+  const htmlByDate = {};
+  for (let d = 1; d <= 10; d++) {
+    const key = "2026-11-" + String(d).padStart(2, "0");
+    const c = cells.find(x => x.dataset && x.dataset.date === key);
+    htmlByDate[key] = c ? c.innerHTML : "";
+  }
+
+  // 詳細カードのトーン確認
+  const day1 = cells.find(x => x.dataset && x.dataset.date === "2026-11-01");
+  await day1.dispatchAsync("click");
+  const detailHtml = getEl("cal-detail-body").innerHTML;
+
+  // 凡例のカラードット確認
+  const legendHtml = getEl("cal-view-defs-container").children.map(el => el.innerHTML);
+
+  console.log(JSON.stringify({
+    htmlByDate,
+    detailHtml,
+    legendHtml,
+    lines3: context.formatCalendarSummaryLines("[早A] (06:00〜15:00)（時間有給1.5h）"),
+    lines2: context.formatCalendarSummaryLines("[早A] (06:00〜15:00)"),
+    lines1: context.formatCalendarSummaryLines("休み")
+  }));
+""")
+        expected_tones = {
+            "2026-11-01": "early-a",
+            "2026-11-02": "early-b",
+            "2026-11-03": "early-c",
+            "2026-11-04": "early-d",
+            "2026-11-05": "day",
+            "2026-11-06": "late-a",
+            "2026-11-07": "late-b",
+            "2026-11-08": "late-c",
+            "2026-11-09": "early-a",
+            "2026-11-10": "late-c",
+        }
+        for date_key, tone in expected_tones.items():
+            self.assertIn(f'data-shift-tone="{tone}"', res["htmlByDate"][date_key])
+
+        # 3行改行のHTML構造検証: [早A] / (06:00〜15:00) / （時間有給1.5h）
+        self.assertEqual(res["lines3"], ["[早A]", "(06:00〜15:00)", "（時間有給1.5h）"])
+        self.assertEqual(res["lines2"], ["[早A]", "(06:00〜15:00)"])
+        self.assertEqual(res["lines1"], ["休み"])
+
+        day1_html = res["htmlByDate"]["2026-11-01"]
+        self.assertIn('<span class="cal-summary-line cal-summary-line-main">[早A]</span>', day1_html)
+        self.assertIn('<span class="cal-summary-line cal-summary-line-sub">(06:00〜15:00)</span>', day1_html)
+        self.assertIn('<span class="cal-summary-line cal-summary-line-hourly">（時間有給1.5h）</span>', day1_html)
+
+        # 詳細カード・凡例にもトーンが反映されていること
+        self.assertIn('data-shift-tone="early-a"', res["detailHtml"])
+        self.assertTrue(any('legend-tone-dot" data-shift-tone="early-a"' in h for h in res["legendHtml"]))
+        self.assertTrue(any('legend-tone-dot" data-shift-tone="late-c"' in h for h in res["legendHtml"]))
+
+        # CSSに8トーンすべてのライト/ダーク変数とセレクタが定義されていること
+        css_path = os.path.join(PROJECT_ROOT, "static", "styles.css")
+        with open(css_path, "r", encoding="utf-8") as f:
+            css_text = f.read()
+        for tone in ["early-a", "early-b", "early-c", "early-d", "day", "late-a", "late-b", "late-c"]:
+            self.assertGreaterEqual(css_text.count(f"--shift-tone-{tone}-bg:"), 2)
+            self.assertIn(f'.cal-event-capsule.work[data-shift-tone="{tone}"]', css_text)
+
+    def test_11_calendar_tone_edge_cases_multiline_escape_canvas_and_legend_scope(self):
+        """改行バリエーション/XSSエスケープ・Canvas色分け・時刻境界/不正値フォールバック・凡例ドット範囲を検証"""
+        res = self._run_node(r"""
+  // 1) formatCalendarSummaryLines のバリエーション
+  const lineCases = {
+    noTimeHourly: context.formatCalendarSummaryLines("[日]（時間有給1.5h）"),
+    customHourly: context.formatCalendarSummaryLines("[早B] 研修（時間有給2h）"),
+    halfWidthHourly: context.formatCalendarSummaryLines("[早A] (06:00〜15:00)(時間有給1h)"),
+    noBracketTime: context.formatCalendarSummaryLines("早A (06:00〜15:00)"),
+    emptyStr: context.formatCalendarSummaryLines(""),
+    nullVal: context.formatCalendarSummaryLines(null)
+  };
+
+  // 3) resolveShiftTone の境界値・masterTimeDefs補完・不正値フォールバック
+  vm.runInContext(`
+    masterTimeDefs = {
+      "早A": { start: "06:00", end: "15:00" },
+      "日":  { start: "08:30", end: "17:30" },
+      "遅C": { start: "10:00", end: "19:00" },
+      "特勤": { start: "09:30", end: "18:30" }
+    };
+  `, context);
+
+  const boundaryCases = {
+    "06:14": context.resolveShiftTone("X", "06:14"),
+    "06:15": context.resolveShiftTone("X", "06:15"),
+    "06:44": context.resolveShiftTone("X", "06:44"),
+    "06:45": context.resolveShiftTone("X", "06:45"),
+    "07:29": context.resolveShiftTone("X", "07:29"),
+    "07:30": context.resolveShiftTone("X", "07:30"),
+    "08:14": context.resolveShiftTone("X", "08:14"),
+    "08:15": context.resolveShiftTone("X", "08:15"),
+    "08:44": context.resolveShiftTone("X", "08:44"),
+    "08:45": context.resolveShiftTone("X", "08:45"),
+    "09:14": context.resolveShiftTone("X", "09:14"),
+    "09:15": context.resolveShiftTone("X", "09:15"),
+    "09:44": context.resolveShiftTone("X", "09:44"),
+    "09:45": context.resolveShiftTone("X", "09:45"),
+    fromMasterDef: context.resolveShiftTone({ type: "特勤", status: "work" }),
+    invalidEmpty: context.resolveShiftTone("未知", ""),
+    invalidRange: context.resolveShiftTone("未知", "25:99"),
+    invalidText: context.resolveShiftTone("未知", "invalid"),
+    nullInput: context.resolveShiftTone(null),
+    holidayObj: context.resolveShiftTone({ type: "休", status: "holiday", is_holiday: true }),
+    paidObj: context.resolveShiftTone({ type: "有給", status: "paid_leave", is_paid_leave: true })
+  };
+
+  // XSSエスケープ＆不明時刻セルの描画検証
+  vm.runInContext(`
+    calendarShiftsByDate = {
+      "2026-11-01": { date: "2026-11-01", type: "早A", status: "work", start_time: "06:00", end_time: "15:00", summary: "[早A] <script>alert(1)</script>&test", history_id: "h1" },
+      "2026-11-02": { date: "2026-11-02", type: "日", status: "work", start_time: "08:30", end_time: "17:30", summary: "[日] (08:30〜17:30)", hourly_paid_leave: 2, event: "避難訓練", memo: "印鑑持参", history_id: "h1" },
+      "2026-11-03": { date: "2026-11-03", type: "遅C", status: "work", start_time: "10:00", end_time: "19:00", summary: "[遅C] (10:00〜19:00)", history_id: "h1" },
+      "2026-11-04": { date: "2026-11-04", type: "休", status: "holiday", is_holiday: true, summary: "休み", history_id: "h1" },
+      "2026-11-05": { date: "2026-11-05", type: "有給", status: "paid_leave", is_paid_leave: true, summary: "有給休暇", history_id: "h1" },
+      "2026-11-06": { date: "2026-11-06", type: "未定義", status: "work", summary: "[未定義] 特別", history_id: "h1" }
+    };
+    calendarViewYear = 2026;
+    calendarViewMonth = 11;
+    renderMonthlyCalendarView();
+  `, context);
+
+  const cells = getEl("monthly-calendar-body").children;
+  const xssCellHtml = cells.find(c => c.dataset && c.dataset.date === "2026-11-01").innerHTML;
+  const unknownToneCellHtml = cells.find(c => c.dataset && c.dataset.date === "2026-11-06").innerHTML;
+
+  // 2) renderMonthlyCalendarCanvas のカレンダータブ準拠描画検証
+  const rectFills = [];
+  const strokeColors = [];
+  const textDraws = [];
+  let roundedPathCount = 0;
+  let arcCount = 0;
+  const origCreateElement = documentMock.createElement;
+  documentMock.createElement = (tag) => {
+    if (String(tag).toLowerCase() === "canvas") {
+      const ctx = {
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 1,
+        font: "",
+        textAlign: "left",
+        globalAlpha: 1,
+        scale() {},
+        save() {},
+        restore() {},
+        clip() {},
+        beginPath() {},
+        moveTo() {},
+        lineTo() {},
+        quadraticCurveTo() { roundedPathCount++; },
+        closePath() {},
+        arc() { arcCount++; },
+        fill() { rectFills.push({ color: this.fillStyle }); },
+        stroke() { strokeColors.push(this.strokeStyle); },
+        fillRect(x, y, w, h) { rectFills.push({ color: this.fillStyle, x, y, w, h }); },
+        strokeRect() { strokeColors.push(this.strokeStyle); },
+        fillText(text) { textDraws.push({ text: String(text), color: this.fillStyle }); }
+      };
+      return { width: 0, height: 0, getContext: () => ctx, toDataURL: () => "data:image/png;base64," };
+    }
+    return origCreateElement(tag);
+  };
+  context.renderMonthlyCalendarCanvas(2026, 11);
+  documentMock.createElement = origCreateElement;
+
+  // 4) 凡例ドットの影響範囲分離（カレンダータブあり / 読み込みタブなし）
+  vm.runInContext(`
+    renderCalendarViewDefs(masterTimeDefs);
+    renderMasterDefs(masterTimeDefs);
+  `, context);
+  const calLegendHtml = getEl("cal-view-defs-container").children.map(el => el.innerHTML);
+  const importLegendHtml = getEl("defs-container").children.map(el => el.innerHTML);
+
+  console.log(JSON.stringify({
+    lineCases,
+    boundaryCases,
+    xssCellHtml,
+    unknownToneCellHtml,
+    rectFillColors: rectFills.map(r => r.color),
+    strokeColors,
+    roundedPathCount,
+    arcCount,
+    textDraws,
+    calLegendHtml,
+    importLegendHtml
+  }));
+""")
+        # 1) 改行バリエーション & XSSエスケープ
+        self.assertEqual(res["lineCases"]["noTimeHourly"], ["[日]", "（時間有給1.5h）"])
+        self.assertEqual(res["lineCases"]["customHourly"], ["[早B]", "研修", "（時間有給2h）"])
+        self.assertEqual(res["lineCases"]["halfWidthHourly"], ["[早A]", "(06:00〜15:00)", "(時間有給1h)"])
+        self.assertEqual(res["lineCases"]["noBracketTime"], ["早A", "(06:00〜15:00)"])
+        self.assertEqual(res["lineCases"]["emptyStr"], [])
+        self.assertEqual(res["lineCases"]["nullVal"], [])
+        self.assertNotIn("<script>", res["xssCellHtml"])
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;&amp;test", res["xssCellHtml"])
+
+        # 2) Canvas 描画がカレンダータブ（ライトモード）と同一パレット・角丸カプセル・ピルで描画されること
+        rect_colors = set(res["rectFillColors"])
+        for expected_bg in [
+            "#ffede3",  # 早A
+            "#e8eeff",  # 日
+            "#e6ebf5",  # 遅C
+            "#f2f2f7",  # 休み（--shift-holiday-bg）
+            "#ffebee",  # 有給・時間有給ピル（--shift-paid-bg）
+            "#fff3e0",  # 未定義出勤（--shift-work-bg）
+            "#e6f7f5",  # 行事予定ピル（--event-badge-bg）
+            "rgba(142, 142, 147, 0.12)",  # メモインジケーター
+        ]:
+            self.assertIn(expected_bg, rect_colors)
+        stroke_set = set(res["strokeColors"])
+        for expected_border in ["#f8b494", "#a3b8fa", "#9fb0d1", "#d1d1d6", "#ffcdd2", "#ffcc80", "#99e2d9"]:
+            self.assertIn(expected_border, stroke_set)
+        self.assertGreater(res["roundedPathCount"], 0)
+        self.assertGreaterEqual(res["arcCount"], 3)  # メトリクスカプセルの色ドット3種
+
+        text_color_map = {d["text"]: d["color"] for d in res["textDraws"]}
+        self.assertEqual(text_color_map.get("[早A]"), "#a13a10")
+        self.assertEqual(text_color_map.get("[日]"), "#1d429e")
+        self.assertEqual(text_color_map.get("(08:30〜17:30)"), "#1d429e")
+        self.assertEqual(text_color_map.get("[遅C]"), "#1e3358")
+        self.assertEqual(text_color_map.get("休み"), "#48484a")
+        self.assertEqual(text_color_map.get("有給休暇"), "#c2185b")
+        self.assertEqual(text_color_map.get("[未定義]"), "#b26a00")
+        self.assertEqual(text_color_map.get("時間有給 2h"), "#c2185b")
+        self.assertEqual(text_color_map.get("避難訓練"), "#0f6b63")
+        self.assertEqual(text_color_map.get("印鑑持参"), "#636366")
+
+        # 3) 時刻境界値・補完・不正値フォールバック
+        expected_boundaries = {
+            "06:14": "early-a", "06:15": "early-b",
+            "06:44": "early-b", "06:45": "early-c",
+            "07:29": "early-c", "07:30": "early-d",
+            "08:14": "early-d", "08:15": "day",
+            "08:44": "day",     "08:45": "late-a",
+            "09:14": "late-a",  "09:15": "late-b",
+            "09:44": "late-b",  "09:45": "late-c",
+            "fromMasterDef": "late-b",
+            "invalidEmpty": "",
+            "invalidRange": "",
+            "invalidText": "",
+            "nullInput": "",
+            "holidayObj": "holiday",
+            "paidObj": "paid",
+        }
+        for k, expected in expected_boundaries.items():
+            self.assertEqual(res["boundaryCases"][k], expected, msg=f"key={k}")
+        self.assertNotIn("data-shift-tone=", res["unknownToneCellHtml"])
+
+        # 4) 凡例ドットの影響範囲分離
+        self.assertTrue(any('data-shift-tone="holiday"' in h for h in res["calLegendHtml"]))
+        self.assertTrue(any('data-shift-tone="paid"' in h for h in res["calLegendHtml"]))
+        self.assertFalse(any("legend-tone-dot" in h for h in res["importLegendHtml"]))
+
+    def test_12_share_canvas_palette_sync_summary_height_outside_and_truncation(self):
+        """共有CanvasのCSS色同期・ヘッダー集計/月外除外・行高さ動的拡張・空月・月外半透明・長文省略を検証"""
+        import re
+
+        # 1) static/styles.css の :root（ライトモード）CSS変数を抽出
+        styles_path = os.path.join(PROJECT_ROOT, "static", "styles.css")
+        with open(styles_path, "r", encoding="utf-8") as f:
+            css_text = f.read()
+        root_match = re.search(r":root\s*\{([^}]*)\}", css_text, re.DOTALL)
+        self.assertIsNotNone(root_match, ":root ブロックが見つかりません")
+        css_vars = {}
+        for m in re.finditer(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", root_match.group(1)):
+            css_vars[m.group(1).strip()] = m.group(2).strip()
+
+        res = self._run_node(r"""
+  // 1) JS側のパレット定義を取得
+  const palettes = vm.runInContext(`({
+    tonePalette: SHIFT_TONE_CANVAS_PALETTE,
+    canvasColors: CALENDAR_CANVAS_COLORS
+  })`, context);
+
+  function createTrackingCanvasFactory(withMeasureText) {
+    const records = [];
+    const origCreate = documentMock.createElement;
+    documentMock.createElement = (tag) => {
+      if (String(tag).toLowerCase() === "canvas") {
+        const alphaStack = [];
+        let saveCount = 0;
+        let restoreCount = 0;
+        const textDraws = [];
+        const ctx = {
+          fillStyle: "",
+          strokeStyle: "",
+          lineWidth: 1,
+          font: "",
+          textAlign: "left",
+          globalAlpha: 1,
+          scale() {},
+          save() { saveCount++; alphaStack.push(this.globalAlpha); },
+          restore() { restoreCount++; if (alphaStack.length > 0) this.globalAlpha = alphaStack.pop(); },
+          clip() {},
+          beginPath() {},
+          moveTo() {},
+          lineTo() {},
+          quadraticCurveTo() {},
+          closePath() {},
+          arc() {},
+          fill() {},
+          stroke() {},
+          fillRect() {},
+          strokeRect() {},
+          fillText(text) {
+            textDraws.push({ text: String(text), color: this.fillStyle, alpha: this.globalAlpha });
+          }
+        };
+        if (withMeasureText) {
+          ctx.measureText = (str) => ({ width: String(str || "").length * 10 });
+        }
+        const canvasObj = {
+          width: 0,
+          height: 0,
+          getContext: () => ctx,
+          toDataURL: () => "data:image/png;base64,",
+          _meta: () => ({ saveCount, restoreCount, finalAlpha: ctx.globalAlpha, textDraws })
+        };
+        records.push(canvasObj);
+        return canvasObj;
+      }
+      return origCreate(tag);
+    };
+    return {
+      records,
+      restore: () => { documentMock.createElement = origCreate; }
+    };
+  }
+
+  // 2) 空月（2026年12月：シフト0件）の描画
+  vm.runInContext(`calendarShiftsByDate = {};`, context);
+  let factory = createTrackingCanvasFactory(true);
+  const emptyCanvas = context.renderMonthlyCalendarCanvas(2026, 12);
+  factory.restore();
+  const emptyMeta = emptyCanvas._meta();
+
+  // 3) 当月＋月外混在・時間有給合算・密セル（3行サマリー＋時間有給＋行事＋メモ）＋長文テキスト
+  const longEvent = "とても長い職場全体会議および防災訓練のお知らせテスト";
+  const longMemo = "これはセル幅を確実に超過する非常に長いひとことメモの検証文字列です";
+  vm.runInContext(`
+    paidLeaveConfig.hoursPerDay = 8;
+    calendarShiftsByDate = {
+      "2026-11-30": { date: "2026-11-30", type: "早A", status: "work", start_time: "06:00", end_time: "15:00", summary: "[早A] (06:00〜15:00)", history_id: "h0" },
+      "2026-12-01": { date: "2026-12-01", type: "日", status: "work", start_time: "08:30", end_time: "17:30", summary: "[日] (08:30〜17:30) （時間有給2h）", hourly_paid_leave: 2, event: ${JSON.stringify(longEvent)}, memo: ${JSON.stringify(longMemo)}, history_id: "h1" },
+      "2026-12-02": { date: "2026-12-02", type: "遅B", status: "work", start_time: "09:30", end_time: "18:30", summary: "[遅B] (09:30〜18:30)", history_id: "h1" },
+      "2026-12-03": { date: "2026-12-03", type: "休", status: "holiday", is_holiday: true, summary: "休み", history_id: "h1" },
+      "2026-12-04": { date: "2026-12-04", type: "有給", status: "paid_leave", is_paid_leave: true, summary: "有給休暇", history_id: "h1" },
+      "2027-01-01": { date: "2027-01-01", type: "有給", status: "paid_leave", is_paid_leave: true, summary: "有給休暇", history_id: "h2" }
+    };
+  `, context);
+
+  factory = createTrackingCanvasFactory(true);
+  const denseCanvas = context.renderMonthlyCalendarCanvas(2026, 12);
+  factory.restore();
+  const denseMeta = denseCanvas._meta();
+
+  // 4) truncateCanvasText の measureText あり／なし単体検証
+  const truncResults = vm.runInContext(`({
+    withMeasureShort: truncateCanvasText({ measureText: (s) => ({ width: s.length * 10 }) }, "短い", 100, 10),
+    withMeasureLong: truncateCanvasText({ measureText: (s) => ({ width: s.length * 10 }) }, "あいうえおかきくけこさしすせそ", 60, 10),
+    fallbackShort: truncateCanvasText({}, "短い", 60, 6),
+    fallbackLong: truncateCanvasText({}, "あいうえおかきくけこ", 60, 6)
+  })`, context);
+
+  console.log(JSON.stringify({
+    palettes,
+    emptyHeight: emptyCanvas.height,
+    denseHeight: denseCanvas.height,
+    emptyTexts: emptyMeta.textDraws.map(d => d.text),
+    denseMeta,
+    truncResults
+  }));
+""")
+
+        # 1) CSS変数とCanvasパレットの完全一致検証（ドリフト防止）
+        tone_palette = res["palettes"]["tonePalette"]
+        canvas_colors = res["palettes"]["canvasColors"]
+        for tone in ["early-a", "early-b", "early-c", "early-d", "day", "late-a", "late-b", "late-c"]:
+            self.assertEqual(tone_palette[tone]["bg"], css_vars[f"--shift-tone-{tone}-bg"], msg=f"{tone} bg")
+            self.assertEqual(tone_palette[tone]["border"], css_vars[f"--shift-tone-{tone}-border"], msg=f"{tone} border")
+            self.assertEqual(tone_palette[tone]["fg"], css_vars[f"--shift-tone-{tone}-text"], msg=f"{tone} fg")
+
+        for status_key in ["work", "holiday", "paid"]:
+            self.assertEqual(canvas_colors[status_key]["bg"], css_vars[f"--shift-{status_key}-bg"])
+            self.assertEqual(canvas_colors[status_key]["border"], css_vars[f"--shift-{status_key}-border"])
+            self.assertEqual(canvas_colors[status_key]["fg"], css_vars[f"--shift-{status_key}-text"])
+            self.assertEqual(canvas_colors[status_key]["dot"], css_vars[f"--shift-{status_key}-dot"])
+
+        self.assertEqual(canvas_colors["event"]["bg"], css_vars["--event-badge-bg"])
+        self.assertEqual(canvas_colors["event"]["border"], css_vars["--event-badge-border"])
+        self.assertEqual(canvas_colors["event"]["fg"], css_vars["--event-badge-text"])
+        self.assertEqual(canvas_colors["windowBg"], css_vars["--window-bg"])
+        self.assertEqual(canvas_colors["headerBg"], css_vars["--header-bg"])
+        self.assertEqual(canvas_colors["separator"], css_vars["--separator"])
+        self.assertEqual(canvas_colors["controlBorder"], css_vars["--control-border"])
+        self.assertEqual(canvas_colors["labelPrimary"], css_vars["--label-primary"])
+        self.assertEqual(canvas_colors["labelSecondary"], css_vars["--label-secondary"])
+        self.assertEqual(canvas_colors["labelTertiary"], css_vars["--label-tertiary"])
+        self.assertEqual(canvas_colors["sat"], css_vars["--accent"])
+
+        # 2) 空月と密月の高さ比較（行高さ動的拡張＆空月の安全描画）
+        self.assertGreater(res["denseHeight"], res["emptyHeight"])
+        self.assertIn("(登録 0日間)", res["emptyTexts"])
+        self.assertIn("0日", res["emptyTexts"])
+
+        # 3) ヘッダー集計カプセル（当月のみ集計・月外2026-11-30と2027-01-01を除外・時間有給合算）
+        dense_texts = [d["text"] for d in res["denseMeta"]["textDraws"]]
+        self.assertIn("(登録 4日間)", dense_texts)
+        self.assertIn("2日", dense_texts)       # 出勤: 12/1, 12/2（11/30は月外なので除外）
+        self.assertIn("1日", dense_texts)       # 休み: 12/3
+        self.assertIn("1日 2時間", dense_texts)  # 有給休暇: 12/4(1日) + 12/1(時間有給2h)、1/1は月外なので除外
+
+        # 4) 当月外セルの半透明描画（globalAlpha=0.52）とsave/restore対称性＆月表記
+        self.assertEqual(res["denseMeta"]["saveCount"], res["denseMeta"]["restoreCount"])
+        self.assertEqual(res["denseMeta"]["finalAlpha"], 1)
+        alpha_by_text = {}
+        for d in res["denseMeta"]["textDraws"]:
+            alpha_by_text.setdefault(d["text"], []).append(d["alpha"])
+        self.assertIn(0.52, alpha_by_text.get("[早A]", []))   # 11/30（月外）は半透明
+        self.assertIn(1, alpha_by_text.get("[日]", []))       # 12/1（当月）は不透明
+        self.assertIn("11月", dense_texts)
+        self.assertIn("12月", dense_texts)
+        self.assertIn("1月", dense_texts)
+
+        # 5) 長文テキストの省略（measureTextあり／なし両方）
+        tr = res["truncResults"]
+        self.assertEqual(tr["withMeasureShort"], "短い")
+        self.assertTrue(tr["withMeasureLong"].endswith("…"))
+        self.assertLessEqual(len(tr["withMeasureLong"]) * 10, 60)
+        self.assertEqual(tr["fallbackShort"], "短い")
+        self.assertEqual(tr["fallbackLong"], "あいうえお…")
+        # 実際の描画結果でも長文行事・メモが省略されて描画されていること
+        self.assertTrue(any(t.startswith("とても長い") and t.endswith("…") for t in dense_texts))
+        self.assertTrue(any(t.startswith("これはセル幅") and t.endswith("…") for t in dense_texts))
+
 
 if __name__ == "__main__":
     unittest.main()

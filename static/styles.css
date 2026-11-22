@@ -40,6 +40,47 @@
       --event-badge-bg: #e6f7f5;
       --event-badge-border: #99e2d9;
       --event-badge-text: #0f6b63;
+
+      /* Shift Time-of-Day Tone Palette (Light Mode) */
+      --shift-tone-early-a-bg: #ffede3;
+      --shift-tone-early-a-border: #f8b494;
+      --shift-tone-early-a-text: #a13a10;
+      --shift-tone-early-a-dot: #e85d22;
+
+      --shift-tone-early-b-bg: #fff5d6;
+      --shift-tone-early-b-border: #f2cb63;
+      --shift-tone-early-b-text: #8c5500;
+      --shift-tone-early-b-dot: #d99000;
+
+      --shift-tone-early-c-bg: #eaf8e6;
+      --shift-tone-early-c-border: #a3db99;
+      --shift-tone-early-c-text: #24611f;
+      --shift-tone-early-c-dot: #3b9e38;
+
+      --shift-tone-early-d-bg: #e3f4ff;
+      --shift-tone-early-d-border: #8ecdf5;
+      --shift-tone-early-d-text: #0b5582;
+      --shift-tone-early-d-dot: #0ea5e9;
+
+      --shift-tone-day-bg: #e8eeff;
+      --shift-tone-day-border: #a3b8fa;
+      --shift-tone-day-text: #1d429e;
+      --shift-tone-day-dot: #2563eb;
+
+      --shift-tone-late-a-bg: #eeeaff;
+      --shift-tone-late-a-border: #bab0f7;
+      --shift-tone-late-a-text: #4332a3;
+      --shift-tone-late-a-dot: #6355e0;
+
+      --shift-tone-late-b-bg: #f4e8ff;
+      --shift-tone-late-b-border: #d2adf7;
+      --shift-tone-late-b-text: #6d28a8;
+      --shift-tone-late-b-dot: #9333ea;
+
+      --shift-tone-late-c-bg: #e6ebf5;
+      --shift-tone-late-c-border: #9fb0d1;
+      --shift-tone-late-c-text: #1e3358;
+      --shift-tone-late-c-dot: #334e7d;
     }
 
     /* Dark Mode Palette */
@@ -79,6 +120,47 @@
       --event-badge-bg: #143330;
       --event-badge-border: #245c56;
       --event-badge-text: #64d2c7;
+
+      /* Shift Time-of-Day Tone Palette (Dark Mode) */
+      --shift-tone-early-a-bg: #3c2016;
+      --shift-tone-early-a-border: #6e3926;
+      --shift-tone-early-a-text: #ffaa85;
+      --shift-tone-early-a-dot: #ff7a45;
+
+      --shift-tone-early-b-bg: #392a0f;
+      --shift-tone-early-b-border: #694c1a;
+      --shift-tone-early-b-text: #ffd166;
+      --shift-tone-early-b-dot: #f5a623;
+
+      --shift-tone-early-c-bg: #1a3219;
+      --shift-tone-early-c-border: #2e5c2c;
+      --shift-tone-early-c-text: #8ce086;
+      --shift-tone-early-c-dot: #52c41a;
+
+      --shift-tone-early-d-bg: #132e3d;
+      --shift-tone-early-d-border: #215470;
+      --shift-tone-early-d-text: #7cd4ff;
+      --shift-tone-early-d-dot: #38bdf8;
+
+      --shift-tone-day-bg: #162647;
+      --shift-tone-day-border: #294680;
+      --shift-tone-day-text: #8cb4ff;
+      --shift-tone-day-dot: #4d8dff;
+
+      --shift-tone-late-a-bg: #222042;
+      --shift-tone-late-a-border: #3f3b78;
+      --shift-tone-late-a-text: #b2aeff;
+      --shift-tone-late-a-dot: #817cf5;
+
+      --shift-tone-late-b-bg: #2f1c42;
+      --shift-tone-late-b-border: #57337a;
+      --shift-tone-late-b-text: #d6adff;
+      --shift-tone-late-b-dot: #b469ff;
+
+      --shift-tone-late-c-bg: #1b2436;
+      --shift-tone-late-c-border: #364769;
+      --shift-tone-late-c-text: #a8bee6;
+      --shift-tone-late-c-dot: #6b88bd;
     }
 
     /* macOS Segmented Control */
@@ -332,6 +414,29 @@
 
     .legend-capsule strong {
       color: var(--label-primary);
+    }
+
+    .legend-tone-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--shift-work-dot);
+    }
+
+    .legend-tone-dot[data-shift-tone="early-a"] { background: var(--shift-tone-early-a-dot); }
+    .legend-tone-dot[data-shift-tone="early-b"] { background: var(--shift-tone-early-b-dot); }
+    .legend-tone-dot[data-shift-tone="early-c"] { background: var(--shift-tone-early-c-dot); }
+    .legend-tone-dot[data-shift-tone="early-d"] { background: var(--shift-tone-early-d-dot); }
+    .legend-tone-dot[data-shift-tone="day"]     { background: var(--shift-tone-day-dot); }
+    .legend-tone-dot[data-shift-tone="late-a"]  { background: var(--shift-tone-late-a-dot); }
+    .legend-tone-dot[data-shift-tone="late-b"]  { background: var(--shift-tone-late-b-dot); }
+    .legend-tone-dot[data-shift-tone="late-c"]  { background: var(--shift-tone-late-c-dot); }
+    .legend-tone-dot[data-shift-tone="holiday"] { background: var(--shift-holiday-dot); }
+    .legend-tone-dot[data-shift-tone="paid"]    { background: var(--shift-paid-dot); }
+
+    .legend-capsule.is-active .legend-tone-dot {
+      box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.85);
     }
 
     /* Drop Zone */
@@ -702,6 +807,54 @@
       color: var(--shift-work-text);
     }
 
+    .cal-event-capsule.work[data-shift-tone="early-a"] {
+      background: var(--shift-tone-early-a-bg);
+      border-color: var(--shift-tone-early-a-border);
+      color: var(--shift-tone-early-a-text);
+    }
+
+    .cal-event-capsule.work[data-shift-tone="early-b"] {
+      background: var(--shift-tone-early-b-bg);
+      border-color: var(--shift-tone-early-b-border);
+      color: var(--shift-tone-early-b-text);
+    }
+
+    .cal-event-capsule.work[data-shift-tone="early-c"] {
+      background: var(--shift-tone-early-c-bg);
+      border-color: var(--shift-tone-early-c-border);
+      color: var(--shift-tone-early-c-text);
+    }
+
+    .cal-event-capsule.work[data-shift-tone="early-d"] {
+      background: var(--shift-tone-early-d-bg);
+      border-color: var(--shift-tone-early-d-border);
+      color: var(--shift-tone-early-d-text);
+    }
+
+    .cal-event-capsule.work[data-shift-tone="day"] {
+      background: var(--shift-tone-day-bg);
+      border-color: var(--shift-tone-day-border);
+      color: var(--shift-tone-day-text);
+    }
+
+    .cal-event-capsule.work[data-shift-tone="late-a"] {
+      background: var(--shift-tone-late-a-bg);
+      border-color: var(--shift-tone-late-a-border);
+      color: var(--shift-tone-late-a-text);
+    }
+
+    .cal-event-capsule.work[data-shift-tone="late-b"] {
+      background: var(--shift-tone-late-b-bg);
+      border-color: var(--shift-tone-late-b-border);
+      color: var(--shift-tone-late-b-text);
+    }
+
+    .cal-event-capsule.work[data-shift-tone="late-c"] {
+      background: var(--shift-tone-late-c-bg);
+      border-color: var(--shift-tone-late-c-border);
+      color: var(--shift-tone-late-c-text);
+    }
+
     .cal-event-capsule.holiday {
       background: var(--shift-holiday-bg);
       border: 1px solid var(--shift-holiday-border);
@@ -722,15 +875,39 @@
 
     .cal-event-capsule.is-apple-summary {
       border-radius: 10px;
-      padding: 3px 7px;
+      padding: 4px 7px;
     }
 
     .cal-capsule-title.cal-capsule-summary {
-      display: block;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
       font-size: 10.5px;
       line-height: 1.3;
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+
+    .cal-summary-line {
+      display: block;
+    }
+
+    .cal-summary-line-main {
+      font-weight: 700;
+    }
+
+    .cal-summary-line-sub {
+      font-size: 9.5px;
+      font-weight: 500;
+      opacity: 0.9;
+      font-family: ui-monospace, Menlo, Monaco, monospace;
+      letter-spacing: -0.2px;
+    }
+
+    .cal-summary-line-hourly {
+      font-size: 9.5px;
+      font-weight: 600;
+      opacity: 0.95;
     }
 
     .cal-capsule-time {
@@ -1739,6 +1916,11 @@
       .cal-capsule-title.cal-capsule-summary {
         font-size: 8.5px;
         line-height: 1.25;
+      }
+
+      .cal-summary-line-sub,
+      .cal-summary-line-hourly {
+        font-size: 7.5px;
       }
 
       .cal-capsule-time {

@@ -374,6 +374,63 @@ def update_history_shift_hourly_leave(history_dir, hist_id, date_str, hours, loa
         return updated_shift
 
 
+def _apply_shift_updates(shift, updates, time_defs, max_hours):
+    """シフト辞書1件に対して updates（区分・時刻・時間有給・行事・メモ）をインプレース適用する。"""
+    new_type = str(updates.get("type") if "type" in updates else (shift.get("type") or "")).strip()
+    raw_status = str(updates.get("status") or "").strip()
+
+    if new_type in ("休", "休み") or raw_status == "holiday":
+        shift["type"] = "休"
+        shift["status"] = "holiday"
+        shift["is_holiday"] = True
+        shift["is_paid_leave"] = False
+        shift["start_time"] = None
+        shift["end_time"] = None
+        shift["hourly_paid_leave"] = 0.0
+        shift["summary"] = "休み"
+    elif new_type in ("有給", "有給休暇") or raw_status == "paid_leave":
+        shift["type"] = "有給"
+        shift["status"] = "paid_leave"
+        shift["is_holiday"] = False
+        shift["is_paid_leave"] = True
+        shift["start_time"] = None
+        shift["end_time"] = None
+        shift["hourly_paid_leave"] = 0.0
+        shift["summary"] = "有給休暇"
+    else:
+        if not new_type:
+            raise ValueError("シフト区分を指定してください")
+        def_entry = time_defs.get(new_type) if isinstance(time_defs, dict) else None
+        start_t = str(updates.get("start_time") or "").strip()
+        end_t = str(updates.get("end_time") or "").strip()
+        if not start_t and def_entry:
+            start_t = str(def_entry.get("start") or "").strip()
+        if not end_t and def_entry:
+            end_t = str(def_entry.get("end") or "").strip()
+        if not start_t:
+            start_t = str(shift.get("start_time") or "08:30").strip()
+        if not end_t:
+            end_t = str(shift.get("end_time") or "17:30").strip()
+
+        raw_hours = updates.get("hourly_paid_leave") if "hourly_paid_leave" in updates else shift.get("hourly_paid_leave", 0)
+        norm_hours = _clamp_half_hour(raw_hours, 0.0, 0.0, max_hours)
+
+        shift["type"] = new_type
+        shift["status"] = "work"
+        shift["is_holiday"] = False
+        shift["is_paid_leave"] = False
+        shift["start_time"] = start_t
+        shift["end_time"] = end_t
+        shift["hourly_paid_leave"] = norm_hours
+        base_summary = f"[{new_type}] ({start_t}〜{end_t})" if (start_t and end_t) else f"[{new_type}]"
+        shift["summary"] = apply_hourly_leave_to_summary(base_summary, norm_hours, "work")
+
+    if "event" in updates:
+        shift["event"] = str(updates.get("event") or "").replace("\r", " ").replace("\n", " ").strip()
+    if "memo" in updates:
+        shift["memo"] = str(updates.get("memo") or "").replace("\r", " ").replace("\n", " ").strip()
+
+
 def update_history_shift(history_dir, hist_id, date_str, updates, load_config_fn):
     """指定履歴の該当日のシフト区分・時間・時間有給・行事予定を更新して保存する。"""
     safe_id = sanitize_history_id(hist_id)
@@ -406,63 +463,7 @@ def update_history_shift(history_dir, hist_id, date_str, updates, load_config_fn
             if not (isinstance(s, dict) and str(s.get("date") or "").strip() == norm_date):
                 continue
 
-            new_type = str(updates.get("type") if "type" in updates else (s.get("type") or "")).strip()
-            raw_status = str(updates.get("status") or "").strip()
-
-            if new_type in ("休", "休み") or raw_status == "holiday":
-                status = "holiday"
-                s["type"] = "休"
-                s["status"] = "holiday"
-                s["is_holiday"] = True
-                s["is_paid_leave"] = False
-                s["start_time"] = None
-                s["end_time"] = None
-                s["hourly_paid_leave"] = 0.0
-                s["summary"] = "休み"
-            elif new_type in ("有給", "有給休暇") or raw_status == "paid_leave":
-                status = "paid_leave"
-                s["type"] = "有給"
-                s["status"] = "paid_leave"
-                s["is_holiday"] = False
-                s["is_paid_leave"] = True
-                s["start_time"] = None
-                s["end_time"] = None
-                s["hourly_paid_leave"] = 0.0
-                s["summary"] = "有給休暇"
-            else:
-                if not new_type:
-                    raise ValueError("シフト区分を指定してください")
-                status = "work"
-                def_entry = time_defs.get(new_type) if isinstance(time_defs, dict) else None
-                start_t = str(updates.get("start_time") or "").strip()
-                end_t = str(updates.get("end_time") or "").strip()
-                if not start_t and def_entry:
-                    start_t = str(def_entry.get("start") or "").strip()
-                if not end_t and def_entry:
-                    end_t = str(def_entry.get("end") or "").strip()
-                if not start_t:
-                    start_t = str(s.get("start_time") or "08:30").strip()
-                if not end_t:
-                    end_t = str(s.get("end_time") or "17:30").strip()
-
-                raw_hours = updates.get("hourly_paid_leave") if "hourly_paid_leave" in updates else s.get("hourly_paid_leave", 0)
-                norm_hours = _clamp_half_hour(raw_hours, 0.0, 0.0, max_hours)
-
-                s["type"] = new_type
-                s["status"] = "work"
-                s["is_holiday"] = False
-                s["is_paid_leave"] = False
-                s["start_time"] = start_t
-                s["end_time"] = end_t
-                s["hourly_paid_leave"] = norm_hours
-                base_summary = f"[{new_type}] ({start_t}〜{end_t})" if (start_t and end_t) else f"[{new_type}]"
-                s["summary"] = apply_hourly_leave_to_summary(base_summary, norm_hours, status)
-
-            if "event" in updates:
-                s["event"] = str(updates.get("event") or "").replace("\r", " ").replace("\n", " ").strip()
-            if "memo" in updates:
-                s["memo"] = str(updates.get("memo") or "").replace("\r", " ").replace("\n", " ").strip()
-
+            _apply_shift_updates(s, updates, time_defs, max_hours)
             updated_shift = dict(s)
             break
 
@@ -550,60 +551,7 @@ def upsert_manual_calendar_shift(history_dir, date_str, updates, load_config_fn,
             }
             shifts.append(existing)
 
-        new_type = str(updates.get("type") if "type" in updates else (existing.get("type") or "")).strip()
-        raw_status = str(updates.get("status") or "").strip()
-
-        if new_type in ("休", "休み") or raw_status == "holiday":
-            existing["type"] = "休"
-            existing["status"] = "holiday"
-            existing["is_holiday"] = True
-            existing["is_paid_leave"] = False
-            existing["start_time"] = None
-            existing["end_time"] = None
-            existing["hourly_paid_leave"] = 0.0
-            existing["summary"] = "休み"
-        elif new_type in ("有給", "有給休暇") or raw_status == "paid_leave":
-            existing["type"] = "有給"
-            existing["status"] = "paid_leave"
-            existing["is_holiday"] = False
-            existing["is_paid_leave"] = True
-            existing["start_time"] = None
-            existing["end_time"] = None
-            existing["hourly_paid_leave"] = 0.0
-            existing["summary"] = "有給休暇"
-        else:
-            if not new_type:
-                raise ValueError("シフト区分を指定してください")
-            def_entry = time_defs.get(new_type) if isinstance(time_defs, dict) else None
-            start_t = str(updates.get("start_time") or "").strip()
-            end_t = str(updates.get("end_time") or "").strip()
-            if not start_t and def_entry:
-                start_t = str(def_entry.get("start") or "").strip()
-            if not end_t and def_entry:
-                end_t = str(def_entry.get("end") or "").strip()
-            if not start_t:
-                start_t = str(existing.get("start_time") or "08:30").strip()
-            if not end_t:
-                end_t = str(existing.get("end_time") or "17:30").strip()
-
-            raw_hours = updates.get("hourly_paid_leave") if "hourly_paid_leave" in updates else existing.get("hourly_paid_leave", 0)
-            norm_hours = _clamp_half_hour(raw_hours, 0.0, 0.0, max_hours)
-
-            existing["type"] = new_type
-            existing["status"] = "work"
-            existing["is_holiday"] = False
-            existing["is_paid_leave"] = False
-            existing["start_time"] = start_t
-            existing["end_time"] = end_t
-            existing["hourly_paid_leave"] = norm_hours
-            base_summary = f"[{new_type}] ({start_t}〜{end_t})" if (start_t and end_t) else f"[{new_type}]"
-            existing["summary"] = apply_hourly_leave_to_summary(base_summary, norm_hours, "work")
-
-        if "event" in updates:
-            existing["event"] = str(updates.get("event") or "").replace("\r", " ").replace("\n", " ").strip()
-        if "memo" in updates:
-            existing["memo"] = str(updates.get("memo") or "").replace("\r", " ").replace("\n", " ").strip()
-
+        _apply_shift_updates(existing, updates, time_defs, max_hours)
         shifts.sort(key=lambda item: str(item.get("date") or ""))
         _atomic_write_json(fpath, data)
         return dict(existing), hist_id
