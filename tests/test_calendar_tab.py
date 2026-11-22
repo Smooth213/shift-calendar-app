@@ -918,6 +918,58 @@ vm.runInContext(scriptMatch[1], context);
         self.assertTrue(res["afterChangeToHoliday"]["hourlySelectDisabled"])
         self.assertIn("0日 0時間", res["afterChangeToHoliday"]["metricsHtml"])
 
+    def test_09_monthly_calendar_displays_apple_calendar_summary(self):
+        """カレンダータブのシフト表示がAppleカレンダー登録名と一致し、区分カラーと時間有給別バッジが維持されること"""
+        res = self._run_node(r"""
+  vm.runInContext(`
+    calendarShiftsByDate = {
+      "2026-11-01": { date: "2026-11-01", type: "早A", status: "work", start_time: "06:00", end_time: "15:00", summary: "[早A] (06:00〜15:00)", history_id: "h1" },
+      "2026-11-02": { date: "2026-11-02", type: "日", status: "work", start_time: "08:30", end_time: "17:30", summary: "[日] (08:30〜17:30)", hourly_paid_leave: 1.5, history_id: "h1" },
+      "2026-11-03": { date: "2026-11-03", type: "休", status: "holiday", is_holiday: true, summary: "休み", history_id: "h1" },
+      "2026-11-04": { date: "2026-11-04", type: "有給", status: "paid_leave", is_paid_leave: true, summary: "有給休暇", history_id: "h1" },
+      "2026-11-05": { date: "2026-11-05", type: "早B", status: "work", start_time: "06:30", end_time: "15:30", summary: "[早B] 研修", history_id: "h1" },
+      "2026-11-06": { date: "2026-11-06", type: "早C", status: "work", start_time: "07:00", end_time: "16:00", history_id: "h1" }
+    };
+    paidLeaveConfig = { startMonth: 4, startDay: 1, annualDays: 20, hoursPerDay: 8 };
+    calendarViewYear = 2026;
+    calendarViewMonth = 11;
+    renderMonthlyCalendarView();
+  `, context);
+
+  const cells = getEl("monthly-calendar-body").children;
+  const htmlByDate = {};
+  for (const d of ["2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"]) {
+    const c = cells.find(x => x.dataset && x.dataset.date === d);
+    htmlByDate[d] = c ? c.innerHTML : "";
+  }
+  console.log(JSON.stringify(htmlByDate));
+""")
+        # 1) 通常出勤: Appleカレンダー登録名表示・workクラス・data-key維持・重複時刻行なし
+        self.assertIn("cal-event-capsule work is-apple-summary", res["2026-11-01"])
+        self.assertIn('data-key="早A"', res["2026-11-01"])
+        self.assertIn("[早A] (06:00〜15:00)", res["2026-11-01"])
+        self.assertNotIn("cal-capsule-time", res["2026-11-01"])
+
+        # 2) 時間有給あり出勤: 登録名に（時間有給1.5h）付記＋別バッジも維持
+        self.assertIn("[日] (08:30〜17:30)（時間有給1.5h）", res["2026-11-02"])
+        self.assertIn("時間有給 1.5h", res["2026-11-02"])
+        self.assertIn("cal-hourly-leave-pill", res["2026-11-02"])
+
+        # 3) 休み・有給休暇: 区分クラス維持・「終日」行なし
+        self.assertIn("cal-event-capsule holiday is-apple-summary", res["2026-11-03"])
+        self.assertIn(">休み<", res["2026-11-03"])
+        self.assertNotIn("終日", res["2026-11-03"])
+
+        self.assertIn("cal-event-capsule paid is-apple-summary", res["2026-11-04"])
+        self.assertIn(">有給休暇<", res["2026-11-04"])
+        self.assertNotIn("終日", res["2026-11-04"])
+
+        # 4) カスタム登録名
+        self.assertIn("[早B] 研修", res["2026-11-05"])
+
+        # 5) summary未設定時のフォールバック
+        self.assertIn("[早C] (07:00〜16:00)", res["2026-11-06"])
+
 
 if __name__ == "__main__":
     unittest.main()

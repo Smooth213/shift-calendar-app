@@ -4,6 +4,7 @@ import os
 import re
 import time
 import zipfile
+from datetime import datetime
 
 from shift_calendar.config import _STORAGE_LOCK, _atomic_write_json, _atomic_write_text
 from shift_calendar.domain import (
@@ -459,6 +460,8 @@ def update_history_shift(history_dir, hist_id, date_str, updates, load_config_fn
 
             if "event" in updates:
                 s["event"] = str(updates.get("event") or "").replace("\r", " ").replace("\n", " ").strip()
+            if "memo" in updates:
+                s["memo"] = str(updates.get("memo") or "").replace("\r", " ").replace("\n", " ").strip()
 
             updated_shift = dict(s)
             break
@@ -468,6 +471,142 @@ def update_history_shift(history_dir, hist_id, date_str, updates, load_config_fn
 
         _atomic_write_json(fpath, data)
         return updated_shift
+
+
+_JP_DOW = ("月", "火", "水", "木", "金", "土", "日")
+
+
+def upsert_manual_calendar_shift(history_dir, date_str, updates, load_config_fn, strftime_fn=None):
+    """未登録日への手入力シフトを追加・更新し、手入力用月別履歴（manual_YYYY_MM）へ保存する。
+
+    戻り値: (updated_shift, hist_id)
+    """
+    norm_date = str(date_str or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", norm_date):
+        raise ValueError("日付の形式が不正です")
+    try:
+        dt = datetime.strptime(norm_date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("実在しない日付です") from exc
+    if not isinstance(updates, dict):
+        raise ValueError("更新内容の形式が不正です")
+
+    _strftime = strftime_fn or time.strftime
+    now_str = _strftime("%Y/%m/%d %H:%M")
+    ym_slug = f"{dt.year}_{dt.month:02d}"
+    hist_id = f"manual_{ym_slug}"
+
+    with _STORAGE_LOCK:
+        os.makedirs(history_dir, exist_ok=True)
+        fpath = os.path.join(history_dir, f"{hist_id}.json")
+        cfg = load_config_fn()
+        time_defs = cfg.get("time_definitions") or {}
+        max_hours = max(0.5, _clamp_half_hour(cfg.get("paid_leave_hours_per_day"), 8.0, 1.0, 24.0) - 0.5)
+        target_name = str(cfg.get("target_name") or "皿田")
+
+        if os.path.exists(fpath):
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data.get("shifts"), list):
+                data["shifts"] = []
+        else:
+            data = {
+                "id": hist_id,
+                "title": f"{dt.year}年{dt.month}月 手入力シフト",
+                "created_at": now_str,
+                "registered": True,
+                "registered_at": now_str,
+                "source": "manual",
+                "target_name": target_name,
+                "shifts": [],
+            }
+
+        data["registered"] = True
+        data["registered_at"] = now_str
+        if not data.get("target_name"):
+            data["target_name"] = target_name
+
+        shifts = data["shifts"]
+        existing = None
+        for s in shifts:
+            if isinstance(s, dict) and str(s.get("date") or "").strip() == norm_date:
+                existing = s
+                break
+
+        if existing is None:
+            existing = {
+                "date": norm_date,
+                "day_of_week": _JP_DOW[dt.weekday()],
+                "type": "",
+                "status": "work",
+                "is_holiday": False,
+                "is_paid_leave": False,
+                "hourly_paid_leave": 0.0,
+                "start_time": None,
+                "end_time": None,
+                "summary": "",
+                "event": "",
+                "memo": "",
+            }
+            shifts.append(existing)
+
+        new_type = str(updates.get("type") if "type" in updates else (existing.get("type") or "")).strip()
+        raw_status = str(updates.get("status") or "").strip()
+
+        if new_type in ("休", "休み") or raw_status == "holiday":
+            existing["type"] = "休"
+            existing["status"] = "holiday"
+            existing["is_holiday"] = True
+            existing["is_paid_leave"] = False
+            existing["start_time"] = None
+            existing["end_time"] = None
+            existing["hourly_paid_leave"] = 0.0
+            existing["summary"] = "休み"
+        elif new_type in ("有給", "有給休暇") or raw_status == "paid_leave":
+            existing["type"] = "有給"
+            existing["status"] = "paid_leave"
+            existing["is_holiday"] = False
+            existing["is_paid_leave"] = True
+            existing["start_time"] = None
+            existing["end_time"] = None
+            existing["hourly_paid_leave"] = 0.0
+            existing["summary"] = "有給休暇"
+        else:
+            if not new_type:
+                raise ValueError("シフト区分を指定してください")
+            def_entry = time_defs.get(new_type) if isinstance(time_defs, dict) else None
+            start_t = str(updates.get("start_time") or "").strip()
+            end_t = str(updates.get("end_time") or "").strip()
+            if not start_t and def_entry:
+                start_t = str(def_entry.get("start") or "").strip()
+            if not end_t and def_entry:
+                end_t = str(def_entry.get("end") or "").strip()
+            if not start_t:
+                start_t = str(existing.get("start_time") or "08:30").strip()
+            if not end_t:
+                end_t = str(existing.get("end_time") or "17:30").strip()
+
+            raw_hours = updates.get("hourly_paid_leave") if "hourly_paid_leave" in updates else existing.get("hourly_paid_leave", 0)
+            norm_hours = _clamp_half_hour(raw_hours, 0.0, 0.0, max_hours)
+
+            existing["type"] = new_type
+            existing["status"] = "work"
+            existing["is_holiday"] = False
+            existing["is_paid_leave"] = False
+            existing["start_time"] = start_t
+            existing["end_time"] = end_t
+            existing["hourly_paid_leave"] = norm_hours
+            base_summary = f"[{new_type}] ({start_t}〜{end_t})" if (start_t and end_t) else f"[{new_type}]"
+            existing["summary"] = apply_hourly_leave_to_summary(base_summary, norm_hours, "work")
+
+        if "event" in updates:
+            existing["event"] = str(updates.get("event") or "").replace("\r", " ").replace("\n", " ").strip()
+        if "memo" in updates:
+            existing["memo"] = str(updates.get("memo") or "").replace("\r", " ").replace("\n", " ").strip()
+
+        shifts.sort(key=lambda item: str(item.get("date") or ""))
+        _atomic_write_json(fpath, data)
+        return dict(existing), hist_id
 
 
 def get_registered_calendar_shifts(history_dir):
@@ -518,6 +657,7 @@ def get_registered_calendar_shifts(history_dir):
                     "end_time": s.get("end_time"),
                     "summary": str(s.get("summary") or ""),
                     "event": str(s.get("event") or ""),
+                    "memo": str(s.get("memo") or ""),
                     "history_id": hist_id,
                     "history_title": hist_title,
                     "registered_at": reg_at,

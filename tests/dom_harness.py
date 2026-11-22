@@ -160,14 +160,24 @@ function createIndexContext(fetchImpl) {
   }
   const storage = new Map();
   const docEl = new MockElement("html");
+  const docListeners = {};
   const doc = {
     documentElement: docEl,
     hidden: false,
+    activeElement: null,
     getElementById: getEl,
     querySelector: () => null,
     querySelectorAll: () => [],
     createElement: (tag) => new MockElement(tag),
-    addEventListener: () => {},
+    addEventListener: (type, fn) => {
+      if (!docListeners[type]) docListeners[type] = [];
+      docListeners[type].push(fn);
+    },
+    async dispatchAsync(type, eventObj = {}) {
+      const ev = Object.assign({ target: docEl, preventDefault() {}, stopPropagation() {} }, eventObj);
+      const list = docListeners[type] || [];
+      for (const fn of list) await fn(ev);
+    },
   };
   const win = {
     location: { protocol: "http:", hostname: "localhost", port: "8765" },

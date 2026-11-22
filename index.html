@@ -74,28 +74,139 @@
               <button type="button" id="btn-cal-next-month" class="btn" title="次の月（右矢印キー）">次月 &gt;</button>
             </div>
           </div>
+
+          <!-- Search & Share Toolbar -->
+          <div class="cal-tools-bar">
+            <div class="cal-search-wrap">
+              <svg class="cal-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              <input type="search" id="cal-search-input" class="input-text cal-search-input"
+                placeholder="過去履歴を検索（行事名・シフト区分・メモ）" aria-label="過去履歴を検索">
+              <button type="button" id="btn-cal-search-clear" class="btn" style="height: 26px; padding: 0 8px; font-size: 11px; display: none;">クリア</button>
+            </div>
+            <div class="cal-share-group">
+              <select id="cal-share-mode" class="settings-select" style="height: 28px; font-size: 11px;" aria-label="テキスト共有対象">
+                <option value="all">全日程</option>
+                <option value="off">休み・有給のみ</option>
+                <option value="early_late">早番・遅番のみ</option>
+              </select>
+              <div class="cal-share-menu-wrap" id="cal-share-menu-wrap">
+                <button type="button" id="btn-cal-share-menu" class="btn cal-share-menu-trigger"
+                  aria-haspopup="menu" aria-expanded="false" aria-controls="cal-share-menu-popover">
+                  <span>共有・出力</span>
+                  <svg class="cal-share-menu-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="6 9 12 15 18 9"></polyline>
+                  </svg>
+                </button>
+                <div id="cal-share-menu-popover" class="cal-share-menu-popover" role="menu" aria-label="共有・出力メニュー">
+                  <button type="button" id="btn-cal-copy-text" class="cal-share-menu-item" role="menuitem">
+                    <svg class="cal-share-menu-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <span class="cal-share-menu-text">
+                      <span class="cal-share-menu-label">テキストをコピー</span>
+                      <span class="cal-share-menu-sub">文字一覧をそのまま貼り付け</span>
+                    </span>
+                  </button>
+                  <button type="button" id="btn-cal-copy-image" class="cal-share-menu-item" role="menuitem">
+                    <svg class="cal-share-menu-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                      <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                      <polyline points="21 15 16 10 5 21"></polyline>
+                    </svg>
+                    <span class="cal-share-menu-text">
+                      <span class="cal-share-menu-label">画像をコピー</span>
+                      <span class="cal-share-menu-sub">端末に保存せず画像で貼り付け</span>
+                    </span>
+                  </button>
+                  <button type="button" id="btn-cal-print" class="cal-share-menu-item" role="menuitem">
+                    <svg class="cal-share-menu-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polyline points="6 9 6 2 18 2 18 9"></polyline>
+                      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+                      <rect x="6" y="14" width="12" height="8"></rect>
+                    </svg>
+                    <span class="cal-share-menu-text">
+                      <span class="cal-share-menu-label">カレンダーを印刷</span>
+                      <span class="cal-share-menu-sub">印刷・PDF出力</span>
+                    </span>
+                  </button>
+                  <button type="button" id="btn-cal-native-share" class="cal-share-menu-item" role="menuitem" style="display: none;">
+                    <svg class="cal-share-menu-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path>
+                      <polyline points="16 6 12 2 8 6"></polyline>
+                      <line x1="12" y1="2" x2="12" y2="15"></line>
+                    </svg>
+                    <span class="cal-share-menu-text">
+                      <span class="cal-share-menu-label">共有…</span>
+                      <span class="cal-share-menu-sub">OSの共有メニューを開く</span>
+                    </span>
+                  </button>
+                  <div class="cal-share-menu-sep" role="separator"></div>
+                  <button type="button" id="btn-cal-export-png" class="cal-share-menu-item" role="menuitem">
+                    <svg class="cal-share-menu-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span class="cal-share-menu-text">
+                      <span class="cal-share-menu-label">PNGファイルとして保存</span>
+                      <span class="cal-share-menu-sub">画像ファイルをダウンロード</span>
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="cal-search-results" class="cal-search-results" role="region" aria-label="検索結果"></div>
         </div>
 
         <!-- Monthly Summary & Annual Paid Leave Count -->
         <div class="cal-summary-stack">
-          <div class="month-card main-month" id="cal-monthly-summary-card">
-            <div class="month-title-capsule">
-              <span id="cal-summary-month-title">----年--月 集計</span>
-              <span id="cal-summary-total-days" style="font-size: 11px; color: var(--label-secondary); font-weight: normal;">(登録 0日間)</span>
+          <div class="month-card main-month cal-accordion-card" id="cal-monthly-summary-card">
+            <div class="cal-accordion-header" id="cal-monthly-summary-header" role="button" tabindex="0"
+              aria-expanded="false" aria-controls="cal-monthly-breakdown-panel" title="クリックでシフト内訳・概算労働時間を表示">
+              <div class="month-title-capsule">
+                <span id="cal-summary-month-title">----年--月 集計</span>
+                <span id="cal-summary-total-days" style="font-size: 11px; color: var(--label-secondary); font-weight: normal;">(登録 0日間)</span>
+              </div>
+              <div class="month-badges">
+                <div class="metric-capsule">
+                  <span class="metric-dot work"></span>
+                  <span>出勤: <strong id="cal-summary-work-days">0日</strong></span>
+                </div>
+                <div class="metric-capsule">
+                  <span class="metric-dot holiday"></span>
+                  <span>休み: <strong id="cal-summary-holiday-days">0日</strong></span>
+                </div>
+                <div class="metric-capsule">
+                  <span class="metric-dot paid"></span>
+                  <span>有給休暇: <strong id="cal-summary-paid-days">0日</strong></span>
+                </div>
+                <button type="button" id="btn-cal-monthly-breakdown-toggle" class="btn cal-accordion-toggle-btn"
+                  aria-expanded="false" aria-controls="cal-monthly-breakdown-panel">
+                  <span>内訳</span>
+                  <svg class="cal-accordion-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="6 9 12 15 18 9"></polyline>
+                  </svg>
+                </button>
+              </div>
             </div>
-            <div class="month-badges">
-              <div class="metric-capsule">
-                <span class="metric-dot work"></span>
-                <span>出勤: <strong id="cal-summary-work-days">0日</strong></span>
+            <div id="cal-monthly-breakdown-panel" class="cal-accordion-panel" role="region" aria-label="月間シフト内訳">
+              <div class="cal-breakdown-meta">
+                <span>概算労働時間（時間有給差引・参考値）: <strong id="cal-monthly-work-hours">0時間</strong></span>
               </div>
-              <div class="metric-capsule">
-                <span class="metric-dot holiday"></span>
-                <span>休み: <strong id="cal-summary-holiday-days">0日</strong></span>
-              </div>
-              <div class="metric-capsule">
-                <span class="metric-dot paid"></span>
-                <span>有給休暇: <strong id="cal-summary-paid-days">0日</strong></span>
-              </div>
+              <div id="cal-monthly-breakdown-list" class="cal-breakdown-list"></div>
             </div>
           </div>
 
@@ -116,12 +227,23 @@
                 <div class="metric-capsule">
                   <span>付与: <strong id="cal-annual-leave-total">20日</strong></span>
                 </div>
+                <button type="button" id="btn-cal-leave-history-toggle" class="btn cal-accordion-toggle-btn"
+                  aria-expanded="false" aria-controls="cal-leave-history-panel">
+                  <span>取得履歴</span>
+                  <svg class="cal-accordion-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="6 9 12 15 18 9"></polyline>
+                  </svg>
+                </button>
                 <button type="button" id="btn-cal-open-leave-settings" class="btn"
                   style="height: 24px; padding: 0 10px; font-size: 11px;">設定変更</button>
               </div>
             </div>
             <div class="cal-progress-track" aria-hidden="true">
               <div id="cal-annual-leave-progress" class="cal-progress-fill"></div>
+            </div>
+            <div id="cal-leave-history-panel" class="cal-accordion-panel" role="region" aria-label="年間有給取得履歴">
+              <div id="cal-leave-history-list" class="cal-leave-history-list"></div>
             </div>
           </div>
         </div>
@@ -169,10 +291,12 @@
           </div>
           <div id="cal-detail-body" class="cal-detail-body"></div>
           <div id="cal-detail-shift-edit-box" class="cal-detail-shift-edit-box">
-            <span style="font-weight: 600; color: var(--label-primary);">シフト修正:</span>
+            <span id="cal-detail-shift-edit-label" style="font-weight: 600; color: var(--label-primary);">シフト修正:</span>
             <select id="cal-detail-shift-type" class="settings-select" style="height: 28px;" aria-label="シフト区分"></select>
-            <input type="text" id="cal-detail-event-input" class="input-text" style="height: 28px; min-width: 150px; flex: 1;"
+            <input type="text" id="cal-detail-event-input" class="input-text" style="height: 28px; min-width: 140px; flex: 1;"
               placeholder="行事予定（任意）" aria-label="行事予定">
+            <input type="text" id="cal-detail-memo-input" class="input-text" style="height: 28px; min-width: 150px; flex: 1;"
+              placeholder="ひとことメモ（任意）" aria-label="ひとことメモ">
             <button type="button" id="btn-cal-save-shift" class="btn btn-primary"
               style="height: 26px; padding: 0 14px; font-size: 11px;">シフトを保存</button>
           </div>
@@ -285,6 +409,24 @@
 
       <!-- Result Container -->
       <div id="result-container">
+        <!-- 読み取り精度プログレスバー -->
+        <div id="quality-summary-card" class="quality-summary-card" style="display: none;">
+          <div class="quality-summary-top">
+            <div class="quality-summary-left">
+              <span class="quality-summary-title">読み取り精度</span>
+              <strong id="quality-score-text" class="quality-score-text">100%</strong>
+              <span id="quality-review-badge" class="quality-review-badge is-ok">要確認 0件</span>
+            </div>
+            <div class="quality-summary-right">
+              <button type="button" id="btn-jump-next-review" class="btn"
+                style="height: 24px; padding: 0 12px; font-size: 11px; display: none;">次の要確認へ移動</button>
+            </div>
+          </div>
+          <div class="quality-progress-track" aria-hidden="true">
+            <div id="quality-progress-fill" class="quality-progress-fill is-high" style="width: 100%;"></div>
+          </div>
+        </div>
+
         <!-- 月単位 集計指標エリア (カプセル型) -->
         <div class="summary-metrics-wrapper">
           <div class="summary-top-row">
@@ -359,6 +501,18 @@
               style="font-size: 11px; font-weight: 600; color: var(--label-secondary); text-transform: uppercase; letter-spacing: 0.4px;">
               シフト調整テーブル</div>
             <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+              <label class="table-col-toggle" title="カレンダー登録名列の表示／非表示を切り替え">
+                <input type="checkbox" id="toggle-show-summary-col">
+                <span>登録名を表示</span>
+              </label>
+              <button type="button" id="btn-undo-shifts" class="btn" style="height: 24px; padding: 0 10px; font-size: 11px; gap: 4px;" disabled title="直前の編集を元に戻す (Cmd+Z)">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="9 14 4 9 9 4"></polyline>
+                  <path d="M20 20v-7a4 4 0 0 0-4-4H4"></path>
+                </svg>
+                <span>元に戻す</span>
+              </button>
               <button type="button" id="btn-skipped-holidays-toggle" class="skipped-holidays-toggle"
                 aria-expanded="false" aria-controls="skipped-holidays-panel">
                 <span id="skipped-holidays-toggle-label">日本の祝日・Googleカレンダー標準行事スキップ 0件</span>
@@ -378,20 +532,19 @@
             <div id="skipped-holidays-list" class="skipped-holidays-list"></div>
           </div>
           <div class="table-frame">
-            <table>
+            <table id="shifts-adjust-table" class="hide-summary-col">
               <thead>
                 <tr>
-                  <th style="width: 34px; text-align: center;">
+                  <th style="width: 32px; text-align: center;">
                     <input type="checkbox" id="check-all" checked>
                   </th>
-                  <th>日付</th>
-                  <th>曜日</th>
-                  <th style="min-width: 150px;">シフト区分（リスト選択）</th>
-                  <th>開始時間</th>
-                  <th>終了時間</th>
-                  <th style="min-width: 96px;">時間有給</th>
-                  <th>カレンダー登録名</th>
-                  <th style="min-width: 130px;">行事予定（終日）</th>
+                  <th style="width: 96px; white-space: nowrap;">日付</th>
+                  <th style="width: 148px;">シフト区分</th>
+                  <th style="width: 136px; white-space: nowrap;">勤務時間</th>
+                  <th style="width: 106px; white-space: nowrap;">時間有給</th>
+                  <th class="col-summary" style="min-width: 170px;">カレンダー登録名</th>
+                  <th style="min-width: 185px;">行事予定（終日）</th>
+                  <th style="min-width: 185px;">ひとことメモ</th>
                 </tr>
               </thead>
               <tbody id="shifts-tbody">
@@ -437,6 +590,21 @@
         <button id="btn-copy-url" class="btn" style="padding: 0 14px;">コピー</button>
       </div>
       <button id="btn-close-qr" class="btn btn-primary" style="width: 100%;">閉じる</button>
+    </div>
+  </div>
+
+  <!-- Calendar Image Preview Modal (クリップボード画像コピー非対応環境・iPhone長押し共有用) -->
+  <div id="cal-image-preview-modal" class="modal-overlay" style="display: none;" role="dialog" aria-modal="true"
+    aria-labelledby="cal-image-preview-title">
+    <div class="modal-card cal-image-preview-card">
+      <div id="cal-image-preview-title" class="modal-title">カレンダー画像</div>
+      <div class="modal-desc" style="margin-bottom: 12px;">
+        画像を長押し（Macは右クリック）して「コピー」または「共有」を選ぶと、端末に保存せずそのまま送れます。
+      </div>
+      <div class="cal-image-preview-frame">
+        <img id="cal-image-preview-img" class="cal-image-preview-img" src="" alt="月間シフトカレンダー画像">
+      </div>
+      <button type="button" id="btn-close-image-preview" class="btn btn-primary" style="width: 100%; margin-top: 14px;">閉じる</button>
     </div>
   </div>
 
@@ -591,6 +759,24 @@
       <div class="settings-modal-actions">
         <button type="button" id="btn-close-settings" class="btn">閉じる</button>
         <button type="button" id="btn-save-settings-modal" class="btn btn-primary">保存して閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- iPhoneアラーム風 3Dドラムロール タイムピッカー -->
+  <div id="time-dial-popover" class="time-dial-popover" role="dialog" aria-label="時刻を選択" style="display: none;">
+    <div class="time-dial-header">
+      <span class="time-dial-title">時刻を選択</span>
+      <button type="button" id="btn-time-dial-done" class="btn btn-primary" style="height: 22px; padding: 0 12px; font-size: 11px; flex-shrink: 0; white-space: nowrap;">完了</button>
+    </div>
+    <div class="time-dial-body">
+      <div class="time-dial-highlight" aria-hidden="true"></div>
+      <div class="time-dial-drum-col">
+        <div id="time-dial-hours" class="time-dial-drum" role="listbox" aria-label="時"></div>
+      </div>
+      <div class="time-dial-colon" aria-hidden="true">:</div>
+      <div class="time-dial-drum-col">
+        <div id="time-dial-minutes" class="time-dial-drum" role="listbox" aria-label="分"></div>
       </div>
     </div>
   </div>

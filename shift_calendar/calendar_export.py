@@ -57,6 +57,9 @@ def create_ics(shifts, calendar_name="シフトカレンダー", include_events=
         next_date_str = (dt + timedelta(days=1)).strftime("%Y%m%d")
 
         # 終日イベント（休み・有給休暇）
+        memo_text = str(s.get("memo") or "").replace("\r", " ").replace("\n", " ").strip()
+        memo_suffix = f" / メモ: {_escape_ics_text(memo_text)}" if memo_text else ""
+
         if is_allday:
             ics_lines.extend([
                 "BEGIN:VEVENT",
@@ -65,7 +68,7 @@ def create_ics(shifts, calendar_name="シフトカレンダー", include_events=
                 f"DTSTART;VALUE=DATE:{date_str}",
                 f"DTEND;VALUE=DATE:{next_date_str}",
                 f"SUMMARY:{summary}",
-                f"DESCRIPTION:区分: {shift_type}",
+                f"DESCRIPTION:区分: {shift_type}{memo_suffix}",
                 "END:VEVENT"
             ])
         # 時間指定の出勤イベント
@@ -81,7 +84,7 @@ def create_ics(shifts, calendar_name="シフトカレンダー", include_events=
                 f"DTSTART;TZID=Asia/Tokyo:{dtstart}",
                 f"DTEND;TZID=Asia/Tokyo:{dtend}",
                 f"SUMMARY:{summary}",
-                f"DESCRIPTION:シフト区分: {shift_type}",
+                f"DESCRIPTION:シフト区分: {shift_type}{memo_suffix}",
                 "END:VEVENT"
             ])
 
@@ -117,6 +120,8 @@ def build_apple_calendar_script(shifts, calendar_name="シフトカレンダー"
         summary = _escape_applescript_str(raw_summary)
         shift_type = _escape_applescript_str(s.get("type") or "")
         event_text = _escape_applescript_str(s.get("event") or "")
+        memo_text = _escape_applescript_str(s.get("memo") or "")
+        memo_suffix = f" / メモ: {memo_text}" if memo_text else ""
 
         parts = d.split("-")
         y, m, day = int(parts[0]), int(parts[1]), int(parts[2])
@@ -153,7 +158,7 @@ def build_apple_calendar_script(shifts, calendar_name="シフトカレンダー"
         # 終日イベント（休み・有給）
         if is_allday:
             day_commands.append(
-                f'make new event at end of events of theCal with properties {{summary:"{summary}", start date:evStart, end date:evEnd, allday event:true, description:"区分: {shift_type}"}}'
+                f'make new event at end of events of theCal with properties {{summary:"{summary}", start date:evStart, end date:evEnd, allday event:true, description:"区分: {shift_type}{memo_suffix}"}}'
             )
             created_shift = True
             event_count += 1
@@ -170,7 +175,7 @@ def build_apple_calendar_script(shifts, calendar_name="シフトカレンダー"
             set minutes of evEnd to {int(et_parts[1])}
             set seconds of evEnd to 0
 
-            make new event at end of events of theCal with properties {{summary:"{summary}", start date:evStart, end date:evEnd, allday event:false, description:"シフト区分: {shift_type}"}}
+            make new event at end of events of theCal with properties {{summary:"{summary}", start date:evStart, end date:evEnd, allday event:false, description:"シフト区分: {shift_type}{memo_suffix}"}}
             """)
             created_shift = True
             event_count += 1

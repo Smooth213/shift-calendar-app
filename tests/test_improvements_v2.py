@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 
 import cv2
 import numpy as np
@@ -293,6 +294,253 @@ class TestImprovementsV2(unittest.TestCase):
             body = json.dumps({"zip_base64": base64.b64encode(b"dummy").decode("ascii")}).encode("utf-8")
             handler._handle_post_history_restore(body)
             self.assertEqual(handler.response_status, 403)
+
+    # --- 追加テスト 1: 新規HTTPエンドポイントのハンドラ検証 ---
+    def test_10_http_static_and_qr_svg_endpoints(self):
+        # 1) GET /static/styles.css は 200 + text/css + no-cache ヘッダー
+        h_css = _MockRequestHandler(path="/static/styles.css")
+        h_css._handle_get_static(urlparse(h_css.path))
+        self.assertEqual(h_css.response_status, 200)
+        self.assertIn("text/css", h_css.response_headers.get("Content-Type", ""))
+        self.assertIn("no-cache", h_css.response_headers.get("Cache-Control", ""))
+        self.assertGreater(len(h_css.wfile.getvalue()), 100)
+
+        # 2) URLエンコードされたパストラバーサルは 404 拒否
+        h_trav = _MockRequestHandler(path="/static/%2e%2e/config.json")
+        h_trav._handle_get_static(urlparse(h_trav.path))
+        self.assertEqual(h_trav.response_status, 404)
+
+        # 3) GET /api/qr.svg は 200 + image/svg+xml
+        h_qr = _MockRequestHandler(path="/api/qr.svg?data=http%3A%2F%2F192.168.1.10%3A8765")
+        h_qr._handle_get_qr_svg(urlparse(h_qr.path))
+        self.assertEqual(h_qr.response_status, 200)
+        self.assertIn("image/svg+xml", h_qr.response_headers.get("Content-Type", ""))
+        svg_text = h_qr.wfile.getvalue().decode("utf-8")
+        self.assertTrue(svg_text.startswith("<svg "))
+        self.assertIn("</svg>", svg_text)
+
+        # 4) データ長上限超過は 400
+        long_data = "a" * 150
+        h_qr_bad = _MockRequestHandler(path=f"/api/qr.svg?data={long_data}")
+        h_qr_bad._handle_get_qr_svg(urlparse(h_qr_bad.path))
+        self.assertEqual(h_qr_bad.response_status, 400)
+
+    def test_11_http_calendar_shift_update_and_backup_restore_endpoints(self):
+        with tempfile.TemporaryDirectory() as src_dir, tempfile.TemporaryDirectory() as dst_dir:
+            with patch.object(shift_app, "HISTORY_DIR", src_dir):
+                hist_id = shift_app.save_history({
+                    "id": "hist_http_1",
+                    "title": "2026年11月度",
+                    "registered": True,
+                    "shifts": [
+                        {
+                            "date": "2026-11-20",
+                            "type": "早A",
+                            "status": "work",
+                            "start_time": "06:00",
+                            "end_time": "15:00",
+                            "summary": "[早A] (06:00〜15:00)",
+                            "event": "",
+                        }
+                    ],
+                })
+
+                # 1) POST /api/calendar_shifts/update（Appleカレンダー同期モック付き）
+                h_upd = _MockRequestHandler(path="/api/calendar_shifts/update")
+                body = json.dumps({
+                    "history_id": hist_id,
+                    "date": "2026-11-20",
+                    "type": "遅C",
+                    "event": "定例会議",
+                    "sync_apple_calendar": True,
+                    "calendar_name": "シフトカレンダー",
+                }).encode("utf-8")
+                with patch.object(shift_app, "register_to_apple_calendar", return_value=(2, "OK")) as mock_reg:
+                    h_upd._handle_post_calendar_shift_update(body)
+                self.assertEqual(h_upd.response_status, 200)
+                upd_resp = json.loads(h_upd.wfile.getvalue().decode("utf-8"))
+                self.assertTrue(upd_resp["success"])
+                self.assertTrue(upd_resp["apple_calendar_synced"])
+                self.assertEqual(upd_resp["shift"]["type"], "遅C")
+                self.assertEqual(upd_resp["shift"]["event"], "定例会議")
+                mock_reg.assert_called_once()
+
+                # 2) 不正日付は 400
+                h_upd_bad = _MockRequestHandler(path="/api/calendar_shifts/update")
+                h_upd_bad._handle_post_calendar_shift_update(
+                    json.dumps({"history_id": hist_id, "date": "invalid-date", "type": "休"}).encode("utf-8")
+                )
+                self.assertEqual(h_upd_bad.response_status, 400)
+
+                # 3) GET /api/history/backup で有効なZIPを取得
+                h_bak = _MockRequestHandler(path="/api/history/backup")
+                h_bak._handle_get_history_backup(urlparse(h_bak.path))
+                self.assertEqual(h_bak.response_status, 200)
+                self.assertEqual(h_bak.response_headers.get("Content-Type"), "application/zip")
+                zip_bytes = h_bak.wfile.getvalue()
+                self.assertTrue(zipfile.is_zipfile(io.BytesIO(zip_bytes)))
+
+            # 4) POST /api/history/restore（ループバック成功 + 不正Base64で400）
+            with patch.object(shift_app, "HISTORY_DIR", dst_dir):
+                h_res = _MockRequestHandler(path="/api/history/restore", client_ip="127.0.0.1")
+                payload = json.dumps({
+                    "zip_base64": "data:application/zip;base64," + base64.b64encode(zip_bytes).decode("ascii"),
+                    "overwrite": False,
+                }).encode("utf-8")
+                h_res._handle_post_history_restore(payload)
+                self.assertEqual(h_res.response_status, 200)
+                res_json = json.loads(h_res.wfile.getvalue().decode("utf-8"))
+                self.assertTrue(res_json["success"])
+                self.assertEqual(res_json["imported_histories"], 1)
+
+                h_res_bad = _MockRequestHandler(path="/api/history/restore", client_ip="127.0.0.1")
+                h_res_bad._handle_post_history_restore(json.dumps({"zip_base64": "%%%invalid%%%"}).encode("utf-8"))
+                self.assertEqual(h_res_bad.response_status, 400)
+
+    # --- 追加テスト 2: 設定モーダルでのシフト区分UI編集＆基本設定サマリー同期 ---
+    def test_12_frontend_settings_shift_defs_editor_and_summary_sync(self):
+        test_js = r"""
+        const postCalls = [];
+        const ctx = createIndexContext(async (url, opts) => {
+          if (url === "/api/config" && opts && opts.method === "POST") {
+            const body = JSON.parse(opts.body);
+            postCalls.push(body);
+            return { ok: true, json: async () => ({ success: true, config: body }) };
+          }
+          return { ok: true, json: async () => ({}) };
+        });
+        const out = await vm.runInContext(`
+          (async () => {
+            masterTimeDefs = { "早A": { start: "06:00", end: "15:00" } };
+            openSettingsModal();
+            // 1) 区分追加して正常保存
+            await getEl("btn-add-shift-def").dispatchAsync("click");
+            const listEl = getEl("settings-defs-list");
+            const addedRow = listEl.children[listEl.children.length - 1];
+            addedRow._defInputs.keyInput.value = "夜勤";
+            addedRow._defInputs.startInput.value = "16:30";
+            addedRow._defInputs.endInput.value = "09:30";
+            getEl("target-name").value = "佐藤";
+            getEl("calendar-name").value = "職場シフト";
+            await getEl("btn-save-settings-modal").dispatchAsync("click");
+            const modalAfterValidSave = getEl("settings-modal").style.display;
+            const summaryTarget = getEl("basic-summary-target-name").textContent;
+            const summaryCal = getEl("basic-summary-calendar-name").textContent;
+            const defsHtml = getEl("defs-container").children.map(c => c.innerHTML).join("|");
+
+            // 2) 予約語「休」を入力した場合は保存されずモーダルが開いたまま
+            openSettingsModal();
+            await getEl("btn-add-shift-def").dispatchAsync("click");
+            const badRow = listEl.children[listEl.children.length - 1];
+            badRow._defInputs.keyInput.value = "休";
+            await getEl("btn-save-settings-modal").dispatchAsync("click");
+            const modalAfterInvalidSave = getEl("settings-modal").style.display;
+
+            // 3) 「標準に戻す」でデフォルト8区分へ戻る
+            await getEl("btn-reset-shift-defs").dispatchAsync("click");
+            const resetCount = listEl.children.length;
+
+            return {
+              modalAfterValidSave,
+              summaryTarget,
+              summaryCal,
+              defsHtml,
+              modalAfterInvalidSave,
+              resetCount,
+            };
+          })()
+        `, ctx);
+        console.log(JSON.stringify({ out, postCalls }));
+        """
+        rc, out, err = run_node_harness(test_js)
+        self.assertEqual(rc, 0, msg=f"Node harness failed: {err}")
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(len(payload["postCalls"]), 1)
+        self.assertIn("夜勤", payload["postCalls"][0]["time_definitions"])
+        self.assertEqual(payload["postCalls"][0]["time_definitions"]["夜勤"], {"start": "16:30", "end": "09:30"})
+        self.assertEqual(payload["out"]["modalAfterValidSave"], "none")
+        self.assertEqual(payload["out"]["summaryTarget"], "佐藤")
+        self.assertEqual(payload["out"]["summaryCal"], "職場シフト")
+        self.assertIn("夜勤", payload["out"]["defsHtml"])
+        self.assertEqual(payload["out"]["modalAfterInvalidSave"], "flex")
+        self.assertEqual(payload["out"]["resetCount"], 8)
+
+    # --- 追加テスト 3: 登録前確認キャンセル時に /api/register が呼ばれないこと ---
+    def test_13_frontend_register_confirm_cancel_aborts_api_call(self):
+        test_js = r"""
+        const registerCalls = [];
+        const ctx = createIndexContext(async (url, opts) => {
+          if (url === "/api/register") registerCalls.push(opts);
+          return { ok: true, json: async () => ({ success: true, count: 1 }) };
+        });
+        ctx.confirm = () => false;
+        await vm.runInContext(`
+          (async () => {
+            analyzedShifts = [
+              { date: "2026-11-22", type: "早A", status: "work", start_time: "06:00", end_time: "15:00", summary: "[早A] (06:00〜15:00)", event: "" }
+            ];
+            getSelectedShifts = () => analyzedShifts;
+            await getEl("btn-register").dispatchAsync("click");
+          })()
+        `, ctx);
+        console.log(JSON.stringify({ registerCallCount: registerCalls.length }));
+        """
+        rc, out, err = run_node_harness(test_js)
+        self.assertEqual(rc, 0, msg=f"Node harness failed: {err}")
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(payload["registerCallCount"], 0)
+
+    # --- 追加テスト 4: ZIP復元の overwrite=True とエッジケース拒否 ---
+    def test_14_history_restore_zip_overwrite_and_edge_cases(self):
+        with tempfile.TemporaryDirectory() as src_dir, tempfile.TemporaryDirectory() as dst_dir:
+            save_history(dst_dir, {
+                "id": "hist_ov_1",
+                "title": "旧タイトル",
+                "registered": True,
+                "shifts": [{"date": "2026-11-01", "type": "早A", "status": "work"}],
+            })
+            save_history(src_dir, {
+                "id": "hist_ov_1",
+                "title": "新タイトル",
+                "registered": True,
+                "shifts": [{"date": "2026-11-01", "type": "遅C", "status": "work"}],
+            })
+            zip_bytes = export_history_backup_zip(src_dir)
+
+            # overwrite=True で既存履歴が上書きされること
+            res_ov = import_history_backup_zip(dst_dir, zip_bytes, overwrite=True)
+            self.assertEqual(res_ov["imported_histories"], 1)
+            self.assertEqual(res_ov["skipped_histories"], 0)
+            detail = get_history_detail(dst_dir, "hist_ov_1")
+            self.assertEqual(detail["title"], "新タイトル")
+            self.assertEqual(detail["shifts"][0]["type"], "遅C")
+
+            # 非ZIPデータ
+            with self.assertRaises(ValueError):
+                import_history_backup_zip(dst_dir, b"not a zip file")
+
+            # 許可外拡張子（history/note.txt）
+            bad_ext = io.BytesIO()
+            with zipfile.ZipFile(bad_ext, "w") as zf:
+                zf.writestr("history/note.txt", "hello")
+            with self.assertRaises(ValueError):
+                import_history_backup_zip(dst_dir, bad_ext.getvalue())
+
+            # 許可外フォルダ（other/a.json）
+            bad_dir = io.BytesIO()
+            with zipfile.ZipFile(bad_dir, "w") as zf:
+                zf.writestr("other/a.json", "{}")
+            with self.assertRaises(ValueError):
+                import_history_backup_zip(dst_dir, bad_dir.getvalue())
+
+            # エントリ数上限超過
+            many_buf = io.BytesIO()
+            with zipfile.ZipFile(many_buf, "w") as zf:
+                for i in range(5):
+                    zf.writestr(f"history/h_{i}.json", f'{{"id": "h_{i}", "shifts": []}}')
+            with patch("shift_calendar.storage.MAX_BACKUP_ZIP_ENTRIES", 3):
+                with self.assertRaises(ValueError):
+                    import_history_backup_zip(dst_dir, many_buf.getvalue())
 
 
 if __name__ == "__main__":

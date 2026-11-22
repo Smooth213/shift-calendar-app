@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -447,6 +448,7 @@ def _build_shift_ocr_prompt_and_image(target_name, processed_bytes, grid_info, e
 1. 上段のタイトル（例: R 8年 12月 → year: 2026, main_month: 12、R 8年 11月 → year: 2026, main_month: 11）から西暦年(year)と対象月(main_month)を読み取ってください（令和8年 = 2026年）。
 2. 赤い列番号 1 から {n_cols} まで、1つも飛ばさず・重複させず、必ず全 {n_cols} 件を順番に出力してください。
 3. 各列番号の真下にある3段目の文字をそのまま正確に shift_text に転記してください（早B と 早A、休 と 早B 等を絶対に混同しないでください）。
+4. 各列の読み取り確信度を confidence ("high" / "medium" / "low") で出力してください。文字がかすれている・潰れている・迷う場合は "medium" または "low" にしてください。
 
 【出力JSONフォーマット】
 {{
@@ -458,7 +460,8 @@ def _build_shift_ocr_prompt_and_image(target_name, processed_bytes, grid_info, e
       "col": 1,
       "date": 29,
       "day_of_week": "日",
-      "shift_text": "休"
+      "shift_text": "休",
+      "confidence": "high"
     }}
   ]
 }}
@@ -494,6 +497,7 @@ def _build_shift_ocr_prompt_and_image(target_name, processed_bytes, grid_info, e
       "day_of_week": "日",
       "is_sunday": true,
       "shift_text": "休",
+      "confidence": "high",
       "box_2d": [ymin, xmin, ymax, xmax]
     }}
   ]
@@ -585,10 +589,14 @@ def normalize_shift_columns(parsed_res, grid_info=None, exact_row_idx=None):
             elif ref_ymin is not None and ref_ymax is not None and isinstance(box, list) and len(box) == 4:
                 box = [ref_ymin, box[1], ref_ymax, box[3]]
 
+            raw_conf = str(c.get("confidence", "high") or "high").strip().lower()
+            conf_val = raw_conf if raw_conf in ("high", "medium", "low") else "high"
+
             shifts.append({
                 "date": date_str,
                 "day_of_week": dow,
                 "type": st_type,
+                "confidence": conf_val,
                 "box_2d": box,
             })
     else:
@@ -632,7 +640,110 @@ def enrich_shift_records(shifts, master_definitions=None):
             time_info = f" ({s['start_time']}〜{s['end_time']})" if s.get("start_time") else ""
             s["summary"] = f"[{st_type}]{time_info}"
         s["event"] = str(s.get("event") or "").strip()
+        raw_conf = str(s.get("confidence") or "high").strip().lower()
+        s["confidence"] = raw_conf if raw_conf in ("high", "medium", "low") else "high"
     return shifts
+
+
+def evaluate_shift_quality(shifts, master_definitions=None):
+    """解析済みシフト配列の読み取り精度・異常を評価し、各要素へ quality_level / quality_reasons を付与する。
+
+    戻り値: {"score_percent": int, "total": int, "ok_count": int, "warning_count": int, "error_count": int, "review_count": int}
+    """
+    defs = master_definitions or DEFAULT_TIME_DEFINITIONS
+    if not isinstance(shifts, list) or not shifts:
+        return {
+            "score_percent": 100,
+            "total": 0,
+            "ok_count": 0,
+            "warning_count": 0,
+            "error_count": 0,
+            "review_count": 0,
+        }
+
+    date_counts = {}
+    for s in shifts:
+        if isinstance(s, dict):
+            d = str(s.get("date") or "").strip()
+            if d:
+                date_counts[d] = date_counts.get(d, 0) + 1
+
+    consecutive_work = 0
+    ok_count = 0
+    warning_count = 0
+    error_count = 0
+    score_sum = 0.0
+
+    for s in shifts:
+        if not isinstance(s, dict):
+            continue
+        reasons = []
+        level = "ok"
+
+        date_str = str(s.get("date") or "").strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+            level = "error"
+            reasons.append("日付形式が不正です")
+        elif date_counts.get(date_str, 0) > 1:
+            level = "error"
+            reasons.append("同一日付が重複しています")
+
+        status = str(s.get("status") or "work")
+        st_type = str(s.get("type") or "").strip()
+        is_work = status == "work" and not s.get("is_holiday") and not s.get("is_paid_leave")
+
+        if is_work:
+            consecutive_work += 1
+            if not st_type:
+                level = "error"
+                reasons.append("シフト記号が空です")
+            elif st_type not in defs and (not s.get("start_time") or not s.get("end_time")):
+                level = "error"
+                reasons.append(f"未定義のシフト記号です ({st_type})")
+            elif not s.get("start_time") or not s.get("end_time"):
+                if level != "error":
+                    level = "warning"
+                reasons.append("開始・終了時刻が未設定です")
+            if consecutive_work >= 6:
+                if level != "error":
+                    level = "warning"
+                reasons.append(f"{consecutive_work}連勤になっています（要確認）")
+        else:
+            consecutive_work = 0
+
+        conf = str(s.get("confidence") or "high").strip().lower()
+        if conf == "low":
+            if level != "error":
+                level = "warning"
+            reasons.append("AI読み取り確信度が低いセルです")
+        elif conf == "medium":
+            if level != "error":
+                level = "warning"
+            reasons.append("AI読み取り確信度が中程度です")
+
+        s["quality_level"] = level
+        s["quality_reasons"] = reasons
+
+        if level == "error":
+            error_count += 1
+            score_sum += 0.0
+        elif level == "warning":
+            warning_count += 1
+            score_sum += 0.6
+        else:
+            ok_count += 1
+            score_sum += 1.0
+
+    total = ok_count + warning_count + error_count
+    score_percent = int(round((score_sum / total) * 100)) if total > 0 else 100
+    return {
+        "score_percent": max(0, min(100, score_percent)),
+        "total": total,
+        "ok_count": ok_count,
+        "warning_count": warning_count,
+        "error_count": error_count,
+        "review_count": warning_count + error_count,
+    }
 
 
 def call_gemini_api(
@@ -735,6 +846,7 @@ def call_gemini_api(
 
     shifts, main_year, main_month = normalize_shift_columns(parsed_res, grid_info=grid_info, exact_row_idx=exact_row_idx)
     enrich_shift_records(shifts, master_definitions=defs)
+    quality_summary = evaluate_shift_quality(shifts, master_definitions=defs)
 
     has_events_candidate = bool(active_event_col_nums)
     _set_progress(
@@ -746,6 +858,7 @@ def call_gemini_api(
     )
 
     parsed_res["shifts"] = shifts
+    parsed_res["quality_summary"] = quality_summary
     parsed_res["year_month"] = f"{main_year:04d}-{main_month:02d}"
     parsed_res["corrected_image_base64"] = corrected_b64
     parsed_res["dewarp_status"] = dewarp_status

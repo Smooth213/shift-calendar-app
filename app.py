@@ -49,7 +49,7 @@ from shift_calendar.domain import (
     apply_hourly_leave_to_summary,
     format_hourly_leave_hours,
 )
-from shift_calendar.gemini_client import post_gemini_generate_content
+from shift_calendar.gemini_client import evaluate_shift_quality, post_gemini_generate_content
 from shift_calendar.image_processing import (
     build_labeled_event_strip,
     build_labeled_name_column_image,
@@ -214,6 +214,12 @@ def update_history_shift_hourly_leave(hist_id, date_str, hours):
 def update_history_shift(hist_id, date_str, updates):
     return _storage_mod.update_history_shift(
         HISTORY_DIR, hist_id, date_str, updates, load_config_fn=load_config
+    )
+
+
+def upsert_manual_calendar_shift(date_str, updates):
+    return _storage_mod.upsert_manual_calendar_shift(
+        HISTORY_DIR, date_str, updates, load_config_fn=load_config, strftime_fn=time.strftime
     )
 
 
@@ -805,18 +811,25 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _handle_post_calendar_shift_update(self, body):
         try:
             req_data = self._parse_json_body(body)
-            hist_id = req_data.get("history_id")
+            hist_id = str(req_data.get("history_id") or "").strip()
             date_str = req_data.get("date")
             sync_apple = bool(req_data.get("sync_apple_calendar", False))
             cal_name = req_data.get("calendar_name") or load_config().get("calendar_name") or "シフトカレンダー"
             include_events = bool(req_data.get("include_events", True))
 
             updates = {}
-            for k in ("type", "status", "start_time", "end_time", "hourly_paid_leave", "event"):
+            for k in ("type", "status", "start_time", "end_time", "hourly_paid_leave", "event", "memo"):
                 if k in req_data:
                     updates[k] = req_data.get(k)
 
-            updated_shift = update_history_shift(hist_id, date_str, updates)
+            created_manual = False
+            if hist_id:
+                updated_shift = update_history_shift(hist_id, date_str, updates)
+                resolved_hist_id = hist_id
+            else:
+                updated_shift, resolved_hist_id = upsert_manual_calendar_shift(date_str, updates)
+                created_manual = True
+
             synced = False
             if sync_apple:
                 register_to_apple_calendar([updated_shift], cal_name, include_events=include_events)
@@ -825,6 +838,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "success": True,
                 "shift": updated_shift,
+                "history_id": resolved_hist_id,
+                "manual_created": created_manual,
                 "apple_calendar_synced": synced,
             })
         except (ValueError, FileNotFoundError) as e:
@@ -908,6 +923,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/api/dewarp_preview": self._handle_post_dewarp_preview,
             "/api/calendar_shifts/hourly_leave": self._handle_post_hourly_leave,
             "/api/calendar_shifts/update": self._handle_post_calendar_shift_update,
+            "/api/calendar_shifts/upsert": self._handle_post_calendar_shift_update,
             "/api/history/save": self._handle_post_history_save,
             "/api/history/delete": self._handle_post_history_delete,
             "/api/history/restore": self._handle_post_history_restore,
